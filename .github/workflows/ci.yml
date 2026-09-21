@@ -20,6 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Telemetry blacklist check
+        run: |
+          bash scripts/check_blacklist.sh
+
       - name: Swift build (debug)
         run: |
           cd Tokei

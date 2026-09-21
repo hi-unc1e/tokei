@@ -144,6 +144,20 @@ ad-hoc 签名。可用 `TOKEI_CODESIGN_IDENTITY=- bash package.sh` 强制 ad-hoc
 `TOKEI_CODESIGN_IDENTITY="证书名称" bash package.sh` 指定签名身份。
 这套自动探测只作用于本地源码构建；官方发布的 DMG 一律是 ad-hoc 签名。
 
+### 遥测黑名单与本地钩子
+
+本 fork 已彻底移除上游的活跃统计遥测（`ActivityReporter`，每日上报安装 ID/版本/系统信息）
+并改用本仓库的 GitHub Releases 分发更新。`scripts/check_blacklist.sh` 是黑名单兜底：
+CI 与每周上游同步都会在服务端执行它，本地请启用同款 pre-commit 钩子：
+
+```bash
+git config core.hooksPath githooks
+```
+
+黑名单模式与原因见脚本头部；上游同步（每周一北京时间凌晨，`.github/workflows/sync-upstream.yml`）
+按 `merge -X ours` 策略合入上游：不冲突的上游改动照常采纳，冲突一律以本地优化为准，
+黑名单/编译/测试全部通过才会推送。
+
 </details>
 
 ## 多设备同步配置

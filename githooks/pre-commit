@@ -1,0 +1,7 @@
+#!/bin/bash
+# pre-commit 钩子：遥测/后门黑名单兜底检查。
+# 通过仓库内的 scripts/check_blacklist.sh 执行；启用方式（克隆后执行一次）：
+#   git config core.hooksPath githooks
+# GitHub Actions 侧由 ci.yml 与 sync-upstream.yml 调用同一脚本做服务端兜底，
+# 因此即使绕过本地钩子（或同步机器人合入上游代码），黑名单仍然生效。
+exec bash "$(dirname "$0")/../scripts/check_blacklist.sh" --staged

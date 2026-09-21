@@ -1,6 +1,6 @@
 name: Sync upstream
 
-# 每日自动把上游 cclank/tokei 的 main 合并进本仓库 main。
+# 每周自动把上游 cclank/tokei 的 main 合并进本仓库 main（北京时间周一凌晨 03:30）。
 #
 # 合并策略（兼顾“跟进上游”与“本地优化优先”）：
 #   git merge upstream/main -X ours
@@ -9,12 +9,12 @@ name: Sync upstream
 #   - 不改写历史（不用 rebase 重放本地提交），远端 main 始终快进，本地各机器
 #     只需 git pull 即可。
 #
-# 安全闸门：合并后必须通过 swift build + Python 测试套件才会推送；
-# 合并失败或测试失败时不推送，并自动开 Issue 提醒人工处理。
+# 安全闸门：合并后必须通过遥测黑名单检查 + swift build + Python 测试套件
+# 才会推送；任一失败都不推送，并自动开 Issue 提醒人工处理。
 on:
   schedule:
-    # GitHub Actions 用 UTC；19:30 UTC = 北京时间次日 03:30
-    - cron: '30 19 * * *'
+    # GitHub Actions 用 UTC；周日 19:30 UTC = 北京时间周一 03:30
+    - cron: '30 19 * * 0'
   workflow_dispatch:
 
 permissions:
@@ -84,6 +84,11 @@ jobs:
             exit 1
           fi
 
+      - name: Verify merge (telemetry blacklist)
+        if: steps.changes.outputs.new_commits == 'true'
+        run: |
+          bash scripts/check_blacklist.sh
+
       - name: Verify merge (swift build)
         if: steps.changes.outputs.new_commits == 'true'
         run: |
@@ -120,8 +125,10 @@ jobs:
           if [ ! -f /tmp/sync-failure.md ]; then
             cat > /tmp/sync-failure.md <<'EOF'
           ## 上游合并后的验证失败
-          合并本身已完成（-X ours 自动解决冲突），但 `swift build` 或 Python 测试未通过。
-          这通常是“上游接口改动 + 本地优化代码”的语义冲突，需要人工检查。
+          合并本身已完成（-X ours 自动解决冲突），但遥测黑名单检查、`swift build`
+          或 Python 测试未通过。
+          这通常是“上游接口改动 + 本地优化代码”的语义冲突（或上游重新引入了
+          已移除的遥测代码），需要人工检查。
           失败日志见 Actions 运行记录。
           EOF
           fi
