@@ -596,7 +596,7 @@ body::after{
       <button class="lang-btn" onclick="toggleLang()">
         <span class="en">中文</span><span class="zh">EN</span>
       </button>
-      <a href="https://dl.lanshuagent.com/tokei/Tokei-v1.0.41.dmg" class="nav-cta">
+      <a href="https://github.com/hi-unc1e/tokei/releases/latest" class="nav-cta">
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4 7l4 4 4-4M2 14h12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="en">Download</span><span class="zh">下载</span>
       </a>
@@ -641,7 +641,7 @@ body::after{
     </p>
 
     <div class="hero-btns rv rv-d4">
-      <a href="https://dl.lanshuagent.com/tokei/Tokei-v1.0.41.dmg" class="btn-p">
+      <a href="https://github.com/hi-unc1e/tokei/releases/latest" class="btn-p">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4 7l4 4 4-4M2 14h12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="en">Download for Mac</span><span class="zh">下载 macOS 版</span>
       </a>
@@ -1066,15 +1066,15 @@ body::after{
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--emerald)" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/><circle cx="12" cy="16" r="1"/></svg>
       </span>
       <h2>
-        <span class="en">Local-first. Activity statistics can be disabled.<br>Your AI usage data stays on your Mac.</span>
-        <span class="zh">本地优先 · 活跃统计可关闭<br>AI 用量数据只留在你的 Mac 上</span>
+        <span class="en">Local-first. No telemetry.<br>Your AI usage data stays on your Mac.</span>
+        <span class="zh">本地优先 · 无遥测<br>AI 用量数据只留在你的 Mac 上</span>
       </h2>
       <p>
-        <span class="en">Core analytics read local logs. App activity statistics are on by default and can be disabled in Settings. A saved opt-out is preserved across updates. While enabled, Tokei sends a random installation ID, app version and OS name/version once per app launch, with no scheduled reports or retries during that run. The service records first/last activity and the latest source IP, without IP history. No accounts, projects, conversations, tokens, costs or quotas are sent. Turning this off stops future reports; previously sent data is retained.</span>
-        <span class="zh">核心分析读取本地日志。应用活跃统计默认开启，可在设置中关闭，升级会保留已关闭的选择；每次启动仅尝试上报一次随机安装 ID、应用版本和系统名称及主次版本。无定时上报，本次运行失败不重试。服务端记录首次／最近活跃时间及最近一次来源 IP，不保留 IP 变更历史。不会上传账号、项目、对话、Token、费用或额度。关闭后停止发送，已发送的数据仍会保留。</span>
+        <span class="en">Core analytics read local logs. This build contains no activity reporting or telemetry: it sends no installation ID, app version or OS information anywhere. The only outbound requests are the optional quota APIs you explicitly enable and the update check against this repository's GitHub Releases. No accounts, projects, conversations, tokens, costs or quotas are sent.</span>
+        <span class="zh">核心分析读取本地日志。本构建不包含任何活跃统计或遥测：不会上报安装 ID、应用版本或系统信息。唯一的联网行为是你主动开启的额度查询接口，以及面向本仓库 GitHub Releases 的更新检查。不会上传账号、项目、对话、Token、费用或额度。</span>
       </p>
       <div class="pills">
-        <span class="pill"><span class="en">Activity stats can be disabled</span><span class="zh">活跃统计可关闭</span></span>
+        <span class="pill"><span class="en">No telemetry</span><span class="zh">无遥测</span></span>
         <span class="pill"><span class="en">No conversation collection</span><span class="zh">不收集对话内容</span></span>
         <span class="pill"><span class="en">No cloud required</span><span class="zh">无需云端</span></span>
         <span class="pill"><span class="en">Quota APIs opt-in</span><span class="zh">额度 API 可选</span></span>
@@ -1318,7 +1318,7 @@ body::after{
       <span class="zh">免费、开源，为在意自己工具的开发者而建。</span>
     </p>
     <div class="hero-btns" style="margin-top:44px">
-      <a href="https://dl.lanshuagent.com/tokei/Tokei-v1.0.41.dmg" class="btn-p" target="_blank" rel="noopener">
+      <a href="https://github.com/hi-unc1e/tokei/releases/latest" class="btn-p" target="_blank" rel="noopener">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4 7l4 4 4-4M2 14h12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="en">Download for macOS</span><span class="zh">下载 macOS 版</span>
       </a>

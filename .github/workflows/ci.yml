@@ -1,0 +1,30 @@
+name: CI
+
+# 每次 push / PR 在 GitHub 的 macOS runner 上编译验证并运行测试套件，
+# 本地无需安装 Xcode。同时作为每日上游同步（sync-upstream.yml）前的基线。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Swift build & Python tests
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift build (debug)
+        run: |
+          cd Tokei
+          swift build
+
+      - name: Python test suite
+        run: |
+          python3 -m unittest discover -s tests -v

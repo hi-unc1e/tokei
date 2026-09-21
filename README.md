@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/python-3.8+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.8+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License">
   <a href="https://github.com/cclank/tokei/stargazers"><img src="https://img.shields.io/github/stars/cclank/tokei?style=flat-square&color=yellow" alt="Stars"></a>
-  <a href="https://github.com/cclank/tokei/releases"><img src="https://img.shields.io/github/v/release/cclank/tokei?style=flat-square&color=blue" alt="Release"></a>
+  <a href="https://github.com/hi-unc1e/tokei/releases"><img src="https://img.shields.io/github/v/release/hi-unc1e/tokei?style=flat-square&color=blue" alt="Release"></a>
 </p>
 
 <h1 align="center">⏱ Tokei 知度</h1>
@@ -12,7 +12,7 @@
 <p align="center">
   <strong>macOS 菜单栏 AI 编程用量监控</strong><br>
   <sub>了然于心，掌控全局。</sub><br><br>
-  <a href="https://tokei.lanshuagent.com">🌐 官网</a> · <a href="https://github.com/cclank/tokei/releases/latest">⬇️ 下载</a> · <a href="#english">English</a>
+  <a href="https://tokei.lanshuagent.com">🌐 官网</a> · <a href="https://github.com/hi-unc1e/tokei/releases/latest">⬇️ 下载</a> · <a href="#english">English</a>
 </p>
 
 ---
@@ -120,7 +120,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 
 ## 快速开始
 
-1. 从 [GitHub Releases](https://github.com/cclank/tokei/releases/latest) 下载最新 DMG
+1. 从 [GitHub Releases](https://github.com/hi-unc1e/tokei/releases/latest) 下载最新 DMG
 2. 打开 DMG，将 Tokei.app 拖入 Applications 文件夹
 3. 首次打开如被 macOS 拦截，在终端运行：`sudo xattr -rd com.apple.quarantine /Applications/Tokei.app`
 4. 打开 Tokei 即可
@@ -129,14 +129,14 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 <summary>从源码构建</summary>
 
 ```bash
-git clone https://github.com/cclank/tokei.git
+git clone https://github.com/hi-unc1e/tokei.git
 cd tokei/Tokei
 TOKEI_LOCAL_BUILD=1 bash package.sh
 open Tokei.app
 ```
 
 本地验证包在设置中显示“本地验证版”，不检查线上更新，避免尚未发布的改动被发布包覆盖。
-正式发布由 `release.sh` 使用 `TOKEI_LOCAL_BUILD=0` 打包，保留正常的更新功能。
+正式发布由 GitHub Actions 在推送 `v*` 标签时自动打包并上传 Release（见 `.github/workflows/release.yml`），保留正常的更新功能。
 
 `package.sh` 会优先使用本机可用的 Developer ID / Apple Development
 证书，让 Keychain 中的 Provider 密钥在重复构建后仍可访问；没有证书时会回退到
@@ -156,7 +156,7 @@ Tokei 支持通过私有 Git 仓库在多台机器间同步用量数据。
 
 ```bash
 git clone <你的私有仓库> ~/.tokei/sync
-curl -fsSL https://dl.lanshuagent.com/tokei/usage.30s.py -o ~/.tokei/usage.30s.py
+curl -fsSL https://github.com/hi-unc1e/tokei/releases/latest/download/usage.30s.py -o ~/.tokei/usage.30s.py
 echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'","auto_sync":true,"sync_interval":30}' > ~/.tokei/config.json
 cat > ~/.tokei/tokei-sync.sh <<'SH'
 #!/bin/bash

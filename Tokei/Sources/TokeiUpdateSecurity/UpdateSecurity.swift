@@ -142,10 +142,8 @@ public enum ShellEscaping {
 public enum UpdateSecurity {
     private static let metadataHosts: Set<String> = [
         "api.github.com",
-        "dl.lanshuagent.com",
     ]
     private static let downloadSourceHosts: Set<String> = [
-        "dl.lanshuagent.com",
         "github.com",
     ]
     private static let downloadRedirectHosts: Set<String> = [

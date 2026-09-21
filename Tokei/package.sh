@@ -156,7 +156,7 @@ Tokei 安装说明
 
 3. 重新打开 Tokei.app 即可
 
-更多信息: https://tokei.lanshuagent.com
+更多信息: https://github.com/hi-unc1e/tokei
 INSTALL
 
     # 复制背景图到隐藏目录

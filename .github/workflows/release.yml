@@ -1,0 +1,114 @@
+name: Release
+
+# 推送 v* 标签（或手动触发）时，在 GitHub 的 macOS runner 上编译 DMG 并发布到本仓库 Release。
+# 本地不需要 macOS 构建环境；发版流程：提升 Updater.swift 里的 releaseTag → 提交 → ./release.sh
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build DMG & publish GitHub Release
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      # 公开发布固定 ad-hoc 签名，产物不依赖构建机上的个人证书。
+      TOKEI_CODESIGN_IDENTITY: '-'
+      TOKEI_LOCAL_BUILD: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from Updater.swift
+        id: version
+        run: |
+          VERSION="$(sed -nE 's/.*releaseTag = "v([^"]+)".*/\1/p' Tokei/Sources/Tokei/Updater.swift | head -n 1)"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "无法从 Updater.swift 读取版本号" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches app version
+        if: github.event_name == 'push'
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          EXPECTED="v${{ steps.version.outputs.version }}"
+          if [ "$TAG" != "$EXPECTED" ]; then
+            echo "❌ 标签 $TAG 与 Updater.swift 的版本 $EXPECTED 不一致" >&2
+            exit 1
+          fi
+
+      - name: Build app & DMG
+        run: |
+          cd Tokei
+          ./package.sh
+
+      - name: Stage release assets
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          cd Tokei
+          cp Tokei.dmg "Tokei-$TAG.dmg"
+          shasum -a 256 "Tokei-$TAG.dmg" | awk '{print $1}' > "Tokei-$TAG.dmg.sha256"
+          echo "SHA256=$(cat Tokei-$TAG.dmg.sha256)" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ env.SHA256 }}
+        run: |
+          # workflow_dispatch 时若标签不存在则先补打，保证 Release 始终挂在 v* 标签上
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+          NOTES="Tokei $TAG（本 fork 在 GitHub Actions 上构建）
+
+          - DMG: Tokei-$TAG.dmg
+          - SHA-256: \`$SHA256\`
+          - 安装：打开 DMG 拖入 Applications；首次如被 macOS 拦截，运行
+            \`sudo xattr -rd com.apple.quarantine /Applications/Tokei.app\`
+
+          应用内更新会检查本仓库（hi-unc1e/tokei）的 GitHub Releases。"
+          export NOTES
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "Tokei/Tokei-$TAG.dmg" \
+              "Tokei/Tokei-$TAG.dmg.sha256" \
+              "Tokei/latest.json" \
+              "usage.30s.py" \
+              "pricing.json" \
+              "pricing_overrides.json" \
+              --clobber
+          else
+            gh release create "$TAG" \
+              "Tokei/Tokei-$TAG.dmg" \
+              "Tokei/Tokei-$TAG.dmg.sha256" \
+              "Tokei/latest.json" \
+              "usage.30s.py" \
+              "pricing.json" \
+              "pricing_overrides.json" \
+              --title "$TAG" \
+              --notes "$NOTES"
+          fi
+
+      - name: Release summary
+        run: |
+          echo "### 发布完成 ${{ steps.version.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- DMG SHA-256: \`${{ env.SHA256 }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"

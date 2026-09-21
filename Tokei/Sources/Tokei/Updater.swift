@@ -16,14 +16,13 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
     }
 
-    static let releaseTag = "v1.0.41"
+    static let releaseTag = "v1.0.42"
     static let isLocalBuild = Bundle.main.object(forInfoDictionaryKey: "TokeiLocalBuild") as? Bool ?? false
     static let automaticCheckInterval: TimeInterval = 6 * 3600
     @Published var state: State = .idle
 
     private let apiURLs = [
-        URL(string: "https://dl.lanshuagent.com/tokei/latest.json")!,
-        URL(string: "https://api.github.com/repos/cclank/tokei/releases/latest")!,
+        URL(string: "https://api.github.com/repos/hi-unc1e/tokei/releases/latest")!,
     ]
     private var downloadTask: URLSessionDownloadTask?
     private var expectedSHA256: String?

@@ -11,7 +11,7 @@
 - 每台设备独立运行 `usage.30s.py` 采集本机 AI 用量，生成 `<device_id>.json`
 - 所有设备通过一个 **私有 Git 仓库** (`~/.tokei/sync/`) 同步数据
 - Mac 端 Tokei.app 聚合所有设备数据展示；Linux 端通过 crontab 自动采集+推送
-- 采集脚本从 `https://dl.lanshuagent.com/tokei/usage.30s.py` 下载
+- 采集脚本从 `https://github.com/hi-unc1e/tokei/releases/latest/download/usage.30s.py` 下载
 
 ## 执行流程
 
@@ -34,7 +34,7 @@ crontab -l 2>/dev/null | grep -q tokei && echo "✅ crontab 已配置" || echo "
 
 ```bash
 mkdir -p ~/.tokei
-curl -fsSL https://dl.lanshuagent.com/tokei/usage.30s.py -o ~/.tokei/usage.30s.py
+curl -fsSL https://github.com/hi-unc1e/tokei/releases/latest/download/usage.30s.py -o ~/.tokei/usage.30s.py
 chmod +x ~/.tokei/usage.30s.py
 echo "✅ 采集脚本已安装"
 ```

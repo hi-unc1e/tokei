@@ -1,0 +1,139 @@
+name: Sync upstream
+
+# 每日自动把上游 cclank/tokei 的 main 合并进本仓库 main。
+#
+# 合并策略（兼顾“跟进上游”与“本地优化优先”）：
+#   git merge upstream/main -X ours
+#   - 上游改动中与本地不冲突的部分全部采纳（新功能、修复照常进来）；
+#   - 一旦同一处发生冲突，自动以本地版本为准（-X ours），本地优化不会被覆盖；
+#   - 不改写历史（不用 rebase 重放本地提交），远端 main 始终快进，本地各机器
+#     只需 git pull 即可。
+#
+# 安全闸门：合并后必须通过 swift build + Python 测试套件才会推送；
+# 合并失败或测试失败时不推送，并自动开 Issue 提醒人工处理。
+on:
+  schedule:
+    # GitHub Actions 用 UTC；19:30 UTC = 北京时间次日 03:30
+    - cron: '30 19 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/cclank/tokei.git
+  ISSUE_TITLE: '上游同步失败，需要人工处理'
+
+jobs:
+  sync:
+    name: Merge upstream/main (ours on conflict)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # 用默认 GITHUB_TOKEN 推送；由它触发的 push 不会再级联触发其他 workflow
+          persist-credentials: true
+
+      - name: Configure git
+        run: |
+          git config user.name 'tokei-sync[bot]'
+          git config user.email 'actions@users.noreply.github.com'
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch upstream main
+          echo "UPSTREAM_SHA=$(git rev-parse upstream/main)" >> "$GITHUB_ENV"
+
+      - name: Check for new upstream commits
+        id: changes
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "new_commits=false" >> "$GITHUB_OUTPUT"
+            echo "上游没有新提交，无需同步。"
+          else
+            COUNT="$(git rev-list --count HEAD..upstream/main)"
+            echo "上游有 $COUNT 个新提交。"
+            echo "new_commits=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream with ours strategy
+        if: steps.changes.outputs.new_commits == 'true'
+        run: |
+          set -eu
+          echo "BASE_BEFORE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          if ! git merge upstream/main \
+              -m "sync: merge upstream cclank/tokei@${UPSTREAM_SHA} (conflicts resolved in favor of ours)" \
+              -X ours; then
+            git merge --abort 2>/dev/null || true
+            {
+              echo '## 上游合并失败（-X ours 无法自动解决的冲突）'
+              echo
+              echo "上游提交: ${UPSTREAM_SHA}"
+              echo "请在本地执行："
+              echo '```bash'
+              echo 'git fetch https://github.com/cclank/tokei.git main:upstream-main'
+              echo 'git merge upstream-main -X ours   # 冲突以本地为主，逐个确认'
+              echo 'git push'
+              echo '```'
+            } > /tmp/sync-failure.md
+            exit 1
+          fi
+
+      - name: Verify merge (swift build)
+        if: steps.changes.outputs.new_commits == 'true'
+        run: |
+          cd Tokei
+          swift build
+
+      - name: Verify merge (python tests)
+        if: steps.changes.outputs.new_commits == 'true'
+        run: |
+          python3 -m unittest discover -s tests -v
+
+      - name: Push merged main
+        if: steps.changes.outputs.new_commits == 'true'
+        run: |
+          git push origin main
+          echo "已推送合并后的 main（基于 ${BASE_BEFORE}，合入上游 ${UPSTREAM_SHA}）"
+
+      - name: Close stale sync-failure issues
+        if: steps.changes.outputs.new_commits == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$ISSUE_TITLE in:title" \
+            --json number --jq '.[].number' | while read -r n; do
+              gh issue close "$n" --repo "$GITHUB_REPOSITORY" \
+                --comment "上游同步已在本次运行中成功完成，关闭此 Issue。"
+            done || true
+
+      - name: Open issue on failure
+        if: failure() && steps.changes.outputs.new_commits == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ ! -f /tmp/sync-failure.md ]; then
+            cat > /tmp/sync-failure.md <<'EOF'
+          ## 上游合并后的验证失败
+          合并本身已完成（-X ours 自动解决冲突），但 `swift build` 或 Python 测试未通过。
+          这通常是“上游接口改动 + 本地优化代码”的语义冲突，需要人工检查。
+          失败日志见 Actions 运行记录。
+          EOF
+          fi
+          # 一次只保留一个未解决的同步 Issue
+          EXISTING="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$ISSUE_TITLE in:title" --json number --jq '.[0].number' || true)"
+          if [ -n "${EXISTING:-}" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body-file /tmp/sync-failure.md
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "$ISSUE_TITLE" \
+              --body-file /tmp/sync-failure.md \
+              --label 'sync-failure' 2>/dev/null \
+              || gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body-file /tmp/sync-failure.md
+          fi

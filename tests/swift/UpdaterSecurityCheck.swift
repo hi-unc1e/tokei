@@ -20,34 +20,34 @@ private enum UpdaterSecurityCheck {
         try testVersionSelection(digest: digest)
 
         try expect(UpdateSecurity.isAllowedMetadataURL(
-            try url("https://api.github.com/repos/cclank/tokei/releases/latest")
+            try url("https://api.github.com/repos/hi-unc1e/tokei/releases/latest")
         ), "GitHub metadata URL should be allowed")
         try expect(UpdateSecurity.isAllowedDownloadSourceURL(
-            try url("https://dl.lanshuagent.com/tokei/Tokei-v1.0.14.dmg")
-        ), "official mirror should be allowed")
+            try url("https://github.com/hi-unc1e/tokei/releases/download/v1.0.14/Tokei.dmg")
+        ), "GitHub release asset should be allowed")
         try expect(UpdateSecurity.isAllowedDownloadResponseURL(
             try url("https://release-assets.githubusercontent.com/github-production-release-asset/file")
         ), "GitHub release redirect should be allowed")
 
         try expect(!UpdateSecurity.isAllowedDownloadSourceURL(
-            try url("http://dl.lanshuagent.com/tokei/Tokei.dmg")
+            try url("http://github.com/hi-unc1e/tokei/releases/download/v1.0.14/Tokei.dmg")
         ), "plain HTTP should be rejected")
         try expect(!UpdateSecurity.isAllowedDownloadSourceURL(
-            try url("https://dl.lanshuagent.com.evil.example/Tokei.dmg")
+            try url("https://github.com.evil.example/Tokei.dmg")
         ), "lookalike subdomain should be rejected")
         try expect(!UpdateSecurity.isAllowedDownloadSourceURL(
             try url("https://github.com@evil.example/Tokei.dmg")
         ), "userinfo host confusion should be rejected")
         try expect(!UpdateSecurity.isAllowedDownloadSourceURL(
-            try url("https://github.com:444/cclank/tokei/Tokei.dmg")
+            try url("https://github.com:444/hi-unc1e/tokei/Tokei.dmg")
         ), "unexpected port should be rejected")
 
         let githubJSON: [String: Any] = [
             "tag_name": "v1.0.14",
-            "url": "https://api.github.com/repos/cclank/tokei/releases/1",
+            "url": "https://api.github.com/repos/hi-unc1e/tokei/releases/1",
             "assets": [[
                 "name": "Tokei.dmg",
-                "browser_download_url": "https://github.com/cclank/tokei/releases/download/v1.0.14/Tokei.dmg",
+                "browser_download_url": "https://github.com/hi-unc1e/tokei/releases/download/v1.0.14/Tokei.dmg",
                 "digest": "sha256:\(digest.uppercased())",
             ]],
         ]
@@ -59,14 +59,14 @@ private enum UpdaterSecurityCheck {
 
         let mirrorJSON: [String: Any] = [
             "version": "v1.0.14",
-            "download_url": "https://dl.lanshuagent.com/tokei/Tokei-v1.0.14.dmg",
+            "download_url": "https://github.com/hi-unc1e/tokei/releases/download/v1.0.14/Tokei-v1.0.14.dmg",
             "sha256": digest,
         ]
         try expect(UpdateSecurity.validatedRelease(from: mirrorJSON)?.sha256 == digest,
-                   "mirror metadata with a digest should parse")
+                   "release metadata with a digest should parse")
         try expect(UpdateSecurity.validatedRelease(from: [
             "tag_name": "v1.0.14",
-            "download_url": "https://dl.lanshuagent.com/tokei/Tokei-v1.0.14.dmg",
+            "download_url": "https://github.com/hi-unc1e/tokei/releases/download/v1.0.14/Tokei-v1.0.14.dmg",
         ]) == nil, "missing digest should be rejected")
         try expect(UpdateSecurity.validatedRelease(from: [
             "tag_name": "v1.0.14",
@@ -246,7 +246,7 @@ private enum UpdaterSecurityCheck {
         )
         let newer = UpdateRelease(
             tag: "v1.1.0",
-            downloadURL: try url("https://dl.lanshuagent.com/tokei/Tokei-v1.1.0.dmg"),
+            downloadURL: try url("https://github.com/hi-unc1e/tokei/releases/download/v1.1.0/Tokei.dmg"),
             sha256: digest
         )
         try expect(
