@@ -34,15 +34,21 @@ class UsageSummaryBuilderTests(unittest.TestCase):
                 check=True,
                 cwd=ROOT,
             )
-            result = subprocess.run(
-                [str(binary)],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=env,
-            )
+            try:
+                result = subprocess.run(
+                    [str(binary)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+            except subprocess.CalledProcessError as exc:
+                # 崩溃时转储二进制的 stdout/stderr，避免只有信号编号可看
+                print(f"check binary failed ({exc.returncode})")
+                print("stdout:", exc.output or "(empty)")
+                print("stderr:", exc.stderr or "(empty)")
+                raise
             self.assertIn("usage summary builder checks passed", result.stdout)
-
 
 if __name__ == "__main__":
     unittest.main()

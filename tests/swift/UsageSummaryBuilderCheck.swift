@@ -12,8 +12,11 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 @main
 struct UsageSummaryBuilderCheck {
     static func main() throws {
+        let headless = ProcessInfo.processInfo.environment["TOKEI_HEADLESS"] == "1"
         // ImageRenderer needs an AppKit app instance (same as --shot).
-        _ = NSApplication.shared
+        // 无头环境（GitHub Actions runner）初始化 NSApplication 会崩溃，
+        // 只有需要 GUI 检查时才创建。
+        if !headless { _ = NSApplication.shared }
 
         let usage = try decodeFixture(Self.fixtureJSON)
         let allVisible = UsageToolVisibility.allVisible
@@ -142,9 +145,9 @@ struct UsageSummaryBuilderCheck {
 
         // Generated share images (footer + per-tool).
         // ImageRenderer/NSPasteboard 需要真实 GUI 会话；GitHub Actions 的 macOS
-        // runner 是无头环境，该段会 SIGSEGV，设置 TOKEI_HEADLESS=1 跳过（纯逻辑
+        // runner 是无头环境，该段会崩溃，设置 TOKEI_HEADLESS=1 跳过（纯逻辑
         // 断言全部保留）。本地开发不设置该变量，行为不变。
-        if ProcessInfo.processInfo.environment["TOKEI_HEADLESS"] == "1" {
+        if headless {
             print("usage summary builder checks passed (headless: share-image checks skipped)")
         } else {
             try MainActor.assumeIsolated {
