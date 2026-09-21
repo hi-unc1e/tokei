@@ -141,44 +141,51 @@ struct UsageSummaryBuilderCheck {
         ).contains("输入"), "text totals include input detail")
 
         // Generated share images (footer + per-tool).
-        try MainActor.assumeIsolated {
-            guard let png = UsageShareImage.pngData(
-                usage: usage, range: .today, visibility: allVisible, updated: "更新 21:51:18"
-            ) else {
-                throw TestFailure.assertion("pngData returned nil")
-            }
-            try expect(png.count > 800, "png too small: \(png.count)")
-            try expect(png.starts(with: [0x89, 0x50, 0x4E, 0x47]), "not a PNG")
+        // ImageRenderer/NSPasteboard 需要真实 GUI 会话；GitHub Actions 的 macOS
+        // runner 是无头环境，该段会 SIGSEGV，设置 TOKEI_HEADLESS=1 跳过（纯逻辑
+        // 断言全部保留）。本地开发不设置该变量，行为不变。
+        if ProcessInfo.processInfo.environment["TOKEI_HEADLESS"] == "1" {
+            print("usage summary builder checks passed (headless: share-image checks skipped)")
+        } else {
+            try MainActor.assumeIsolated {
+                guard let png = UsageShareImage.pngData(
+                    usage: usage, range: .today, visibility: allVisible, updated: "更新 21:51:18"
+                ) else {
+                    throw TestFailure.assertion("pngData returned nil")
+                }
+                try expect(png.count > 800, "png too small: \(png.count)")
+                try expect(png.starts(with: [0x89, 0x50, 0x4E, 0x47]), "not a PNG")
 
-            guard let hiddenPng = UsageShareImage.pngData(
-                usage: usage, range: .today, visibility: hideGemini, updated: nil
-            ) else {
-                throw TestFailure.assertion("hidden png nil")
-            }
-            try expect(hiddenPng.count > 800, "hidden png too small")
-            try expect(hiddenPng != png, "hidden vs all-visible images should differ")
+                guard let hiddenPng = UsageShareImage.pngData(
+                    usage: usage, range: .today, visibility: hideGemini, updated: nil
+                ) else {
+                    throw TestFailure.assertion("hidden png nil")
+                }
+                try expect(hiddenPng.count > 800, "hidden png too small")
+                try expect(hiddenPng != png, "hidden vs all-visible images should differ")
 
-            guard let codexLine = UsageSummaryBuilder.line(
-                forToolID: "codex", usage: usage, range: .today, visibility: allVisible
-            ) else {
-                throw TestFailure.assertion("codex line missing")
-            }
-            guard let singlePng = UsageShareImage.pngData(
-                line: codexLine, range: .today, updated: "更新 12:00:00"
-            ) else {
-                throw TestFailure.assertion("single-tool png nil")
-            }
-            try expect(singlePng.count > 800, "single png too small")
-            try expect(singlePng != png, "single-tool image should differ from overview")
+                guard let codexLine = UsageSummaryBuilder.line(
+                    forToolID: "codex", usage: usage, range: .today, visibility: allVisible
+                ) else {
+                    throw TestFailure.assertion("codex line missing")
+                }
+                guard let singlePng = UsageShareImage.pngData(
+                    line: codexLine, range: .today, updated: "更新 12:00:00"
+                ) else {
+                    throw TestFailure.assertion("single-tool png nil")
+                }
+                try expect(singlePng.count > 800, "single png too small")
+                try expect(singlePng != png, "single-tool image should differ from overview")
 
-            let wrote = UsageShareImage.copyToPasteboard(
-                line: codexLine, range: .today, updated: "更新 12:00:00"
-            )
-            try expect(wrote, "single-tool copyToPasteboard failed")
-            let pb = NSPasteboard.general
-            let hasImage = pb.canReadObject(forClasses: [NSImage.self], options: nil)
-                || pb.data(forType: .png) != nil
-            try expect(hasImage, "pasteboard should contain image/png")
+                let wrote = UsageShareImage.copyToPasteboard(
+                    line: codexLine, range: .today, updated: "更新 12:00:00"
+                )
+                try expect(wrote, "single-tool copyToPasteboard failed")
+                let pb = NSPasteboard.general
+                let hasImage = pb.canReadObject(forClasses: [NSImage.self], options: nil)
+                    || pb.data(forType: .png) != nil
+                try expect(hasImage, "pasteboard should contain image/png")
+                }
         }
 
         // 分享图按展示名取主题色；漏登记的工具会掉进默认灰（Muse/Kimi/Prime/DeepSeek 曾全灰）。

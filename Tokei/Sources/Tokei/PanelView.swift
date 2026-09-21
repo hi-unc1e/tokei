@@ -2727,16 +2727,16 @@ struct PanelView: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("当前版本 \(Updater.releaseTag)")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: Theme.fontSize(10), weight: .medium))
                         .foregroundStyle(Theme.tPrimary)
                     Text(Updater.isLocalBuild ? "本地验证版不检查线上更新" : "启动时自动检查，也可在这里手动检查")
-                        .font(.system(size: 8.5))
+                        .font(.system(size: Theme.fontSize(8.5)))
                         .foregroundStyle(Theme.tTertiary)
                 }
                 Spacer()
                 if Updater.isLocalBuild {
                     Text("本地验证版")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: Theme.fontSize(9), weight: .medium))
                         .foregroundStyle(Theme.tTertiary)
                 } else {
                     switch updater.state {
@@ -2749,11 +2749,11 @@ struct PanelView: View {
                             ProgressView().controlSize(.small)
                             Text("正在检查")
                         }
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: Theme.fontSize(9), weight: .medium))
                         .foregroundStyle(Theme.tTertiary)
                     case .upToDate:
                         Label("已是最新版本", systemImage: "checkmark.circle.fill")
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.system(size: Theme.fontSize(9), weight: .medium))
                             .foregroundStyle(.green)
                     case .available(let tag, _, _):
                         settingsActionButton(icon: "arrow.down.circle.fill", title: "升级到 \(tag)") {
@@ -2761,14 +2761,14 @@ struct PanelView: View {
                         }
                     case .downloading(let progress):
                         Text("下载中 \(Int(progress * 100))%")
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .font(.system(size: Theme.fontSize(9), weight: .medium, design: .monospaced))
                             .foregroundStyle(Theme.tSecondary)
                     case .installing:
                         HStack(spacing: 5) {
                             ProgressView().controlSize(.small)
                             Text("正在安装")
                         }
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: Theme.fontSize(9), weight: .medium))
                         .foregroundStyle(Theme.tSecondary)
                     case .failed(let message):
                         VStack(alignment: .trailing, spacing: 3) {
@@ -2776,7 +2776,7 @@ struct PanelView: View {
                                 updater.checkForUpdate()
                             }
                             Text(message)
-                                .font(.system(size: 8))
+                                .font(.system(size: Theme.fontSize(8)))
                                 .foregroundStyle(.red.opacity(0.85))
                                 .lineLimit(2)
                         }
