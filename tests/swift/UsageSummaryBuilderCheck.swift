@@ -9,9 +9,15 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
     if !condition() { throw TestFailure.assertion(message) }
 }
 
+/// 无缓冲的阶段标记：崩溃时 stdout 缓冲会丢失，stderr 能保留到最后一个阶段。
+private func stage(_ name: String) {
+    try? FileHandle.standardError.write(contentsOf: Data(("stage: \(name)\n").utf8))
+}
+
 @main
 struct UsageSummaryBuilderCheck {
     static func main() throws {
+        stage("start")
         let headless = ProcessInfo.processInfo.environment["TOKEI_HEADLESS"] == "1"
         // ImageRenderer needs an AppKit app instance (same as --shot).
         // 无头环境（GitHub Actions runner）初始化 NSApplication 会崩溃，
@@ -19,6 +25,7 @@ struct UsageSummaryBuilderCheck {
         if !headless { _ = NSApplication.shared }
 
         let usage = try decodeFixture(Self.fixtureJSON)
+        stage("decoded")
         let allVisible = UsageToolVisibility.allVisible
         let staleReserveQuota = try JSONDecoder().decode(
             CodexReserveQuota.self,
@@ -144,6 +151,7 @@ struct UsageSummaryBuilderCheck {
         ).contains("输入"), "text totals include input detail")
 
         // Generated share images (footer + per-tool).
+        stage("text-done")
         // ImageRenderer/NSPasteboard 需要真实 GUI 会话；GitHub Actions 的 macOS
         // runner 是无头环境，该段会崩溃，设置 TOKEI_HEADLESS=1 跳过（纯逻辑
         // 断言全部保留）。本地开发不设置该变量，行为不变。
@@ -192,12 +200,14 @@ struct UsageSummaryBuilderCheck {
         }
 
         // 分享图按展示名取主题色；漏登记的工具会掉进默认灰（Muse/Kimi/Prime/DeepSeek 曾全灰）。
+        stage("gui-done")
         let gray = NSColor(Theme.tTertiary)
         for name in ["Prime Agent", "DeepSeek Harness", "Kimi Code", "Muse Code"] {
             let tint = NSColor(UsageShareImage.tint(for: name))
             try expect(!tint.isEqual(gray), "\(name) share tint must not be gray")
         }
 
+        stage("tint-done")
         print("usage summary builder checks passed")
     }
 
