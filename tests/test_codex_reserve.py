@@ -357,10 +357,10 @@ class CodexLunaReserveTests(unittest.TestCase):
                 self.assertEqual(reserve["in"], 50)
                 self.assertEqual(main["in"] + reserve["in"], 150)
                 self.assertEqual(main["out"] + reserve["out"], 15)
-                self.assertEqual(USAGE._CODEX_PARSER_VERSION, 7)
+                self.assertGreaterEqual(USAGE._CODEX_PARSER_VERSION, 7)
                 self.assertEqual(USAGE._CODEX_ACCOUNTING_VERSION, 7)
                 entry = cache["codex"][str(path.resolve())]
-                self.assertEqual(entry["parser_version"], 7)
+                self.assertEqual(entry["parser_version"], USAGE._CODEX_PARSER_VERSION)
                 self.assertEqual(entry["accounting_version"], 7)
                 ledger = USAGE._load_ledger()["tools"]
                 self.assertEqual(ledger["codex"][day_key]["in"], 100)
@@ -431,7 +431,10 @@ class CodexLunaReserveTests(unittest.TestCase):
         main = (sources / "main.swift").read_text()
 
         self.assertIn("var stale: Bool?", model)
-        self.assertIn("let pct = q.usedPercent, q.stale != true", panel)
+        # 过期的 Reserve 读数不得当成当前值展示。原先的做法是整行藏掉，但额度
+        # 在「有」和「没有」之间反复横跳同样让人看不懂，所以改成照常画出来、
+        # 压暗并标记 stale，过期提示仍然保留——要求从"藏起来"变成"标记出来"。
+        self.assertIn("stale: q.stale == true", panel)
         self.assertIn("Reserve 额度读数已过期", panel)
         self.assertIn("+ reserve.tokens", dashboard)
         self.assertIn("+ (usage.codex.reserveRanges?.get(key).cost ?? 0)", dashboard)

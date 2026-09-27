@@ -9,6 +9,24 @@ except ImportError:
 
 
 class ModelNameTests(unittest.TestCase):
+    def test_gpt6_names_and_offline_prices(self):
+        prices = {"astra": (10, 50, 1, 12.5), "sol": (2, 10, 0.2, 2.5),
+                  "luna": (0.1, 0.5, 0.01, 0.125)}
+        with mock.patch.object(USAGE, "_PRICING_DB", {}):
+            for variant, expected in prices.items():
+                for prefix in ("", "openai/"):
+                    with self.subTest(variant=variant, prefix=prefix):
+                        model = f"{prefix}gpt-6-{variant}"
+                        self.assertEqual(USAGE.nice_model(model), f"GPT-6 {variant.title()}")
+                        self.assertEqual(USAGE._model_identity_id(model), f"openai/gpt-6-{variant}")
+                        price = USAGE._raw_price(model)
+                        self.assertEqual(tuple(price[k] for k in ("in", "out", "cache_read", "cache_write")), expected)
+                        self.assertAlmostEqual(USAGE._codex_estimated_cost(model, 200_000, 100_000, 10_000),
+                                               expected[0] * 0.1 + expected[2] * 0.1 + expected[1] * 0.01)
+                        self.assertAlmostEqual(USAGE._codex_estimated_cost(model, 400_000, 300_000, 10_000),
+                                               expected[0] * 0.2 + expected[2] * 0.6 + expected[1] * 0.015)
+        self.assertEqual(USAGE.nice_model("openai/gpt-6-astra-pro"), "GPT-6 Astra Pro")
+
     def test_alias_buckets_merge_without_changing_usage_or_cost(self):
         models = {
             "gpt-6-astra": {"in": 100, "out": 10, "cr": 900, "cw": 2, "reason": 4, "cost": 6.2},

@@ -1,5 +1,23 @@
 {
   "models": {
+    "openai/gpt-6-astra": {
+      "in": 10.0,
+      "out": 50.0,
+      "cache_read": 1.0,
+      "cache_write": 12.5
+    },
+    "openai/gpt-6-sol": {
+      "in": 2.0,
+      "out": 10.0,
+      "cache_read": 0.2,
+      "cache_write": 2.5
+    },
+    "openai/gpt-6-luna": {
+      "in": 0.1,
+      "out": 0.5,
+      "cache_read": 0.01,
+      "cache_write": 0.125
+    },
     "openai/gpt-5.6-sol": {
       "in": 4.0,
       "out": 20.0,

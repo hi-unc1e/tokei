@@ -116,10 +116,9 @@ struct KeepAwakeMenu: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: ka.active ? "cup.and.saucer.fill" : "cup.and.saucer")
-                    .font(.system(size: 10, weight: .semibold))
-                if ka.active {
-                    Text(ka.statusLabel).font(.system(size: 11, weight: .medium))
-                }
+                    .font(.system(size: Theme.fontSize(10), weight: .semibold))
+                Text(ka.active ? ka.statusLabel : "防休眠")
+                    .font(.system(size: Theme.fontSize(11), weight: .medium))
             }
             .foregroundStyle(ka.active ? AnyShapeStyle(Theme.claude) : AnyShapeStyle(.secondary))
             .padding(.horizontal, 9).padding(.vertical, 4)

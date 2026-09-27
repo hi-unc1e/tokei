@@ -162,6 +162,24 @@ MIMOCODE_DB = os.path.abspath(os.path.expanduser(os.environ.get("TOKEI_MIMOCODE_
     if os.environ.get("TOKEI_MIMOCODE_DB") else ""
 OPENCLAW_STATE_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("OPENCLAW_STATE_DIR", os.path.join(HOME, ".openclaw"))))
+# Devin（Cognition）。桌面端是改名后的 Windsurf 编辑器：bundle id 仍是
+# com.exafunction.windsurf，写出的键也仍叫 windsurf.*。Electron 的支持目录跟随
+# 产品名，所以改名前装过 Windsurf 的机器留下 Windsurf/，新装的是 Devin/。
+DEVIN_SUPPORT_DIRS = _path_candidates(
+    "TOKEI_DEVIN_SUPPORT",
+    os.path.join(HOME, "Library", "Application Support", "Devin"),
+    os.path.join(HOME, "Library", "Application Support", "Windsurf"),
+    os.path.join(APPDATA, "Devin"),
+    os.path.join(APPDATA, "Windsurf"),
+    os.path.join(HOME, ".config", "Devin"),
+    os.path.join(HOME, ".config", "Windsurf"))
+# Devin CLI 自己的会话库，和桌面端的套餐缓存互不相干。
+DEVIN_CLI_DB_PATHS = _path_candidates(
+    "TOKEI_DEVIN_CLI_DB",
+    os.path.join(HOME, ".local", "share", "devin", "cli", "sessions.db"),
+    os.path.join(HOME, "Library", "Application Support", "devin", "cli", "sessions.db"),
+    os.path.join(APPDATA, "devin", "cli", "sessions.db"),
+    os.path.join(LOCALAPPDATA, "devin", "cli", "sessions.db"))
 OPENCLAW_DB = os.path.join(OPENCLAW_STATE_DIR, "tasks", "runs.sqlite")
 OPENCLAW_STATE_DB = os.path.join(OPENCLAW_STATE_DIR, "state", "openclaw.sqlite")
 OPENCLAW_AGENTS = os.path.join(OPENCLAW_STATE_DIR, "agents")
@@ -236,6 +254,9 @@ _DEFAULT_PRICES = {
     "openai/gpt-5.6-terra":          {"in": 2.0,   "out": 12.0, "cache_read": 0.2,    "cache_write": 2.5},
     "openai/gpt-5.6-luna":           {"in": 0.2,   "out": 1.2,  "cache_read": 0.02,   "cache_write": 0.25},
     "openai/gpt-5.5":                {"in": 5.0,   "out": 30.0, "cache_read": 0.5,    "cache_write": 0.0},
+    "openai/gpt-6-astra":            {"in": 10.0,  "out": 50.0, "cache_read": 1.0,    "cache_write": 12.5},
+    "openai/gpt-6-sol":              {"in": 2.0,   "out": 10.0, "cache_read": 0.2,    "cache_write": 2.5},
+    "openai/gpt-6-luna":             {"in": 0.1,   "out": 0.5,  "cache_read": 0.01,   "cache_write": 0.125},
     "qwen/qwen3.8-max":              {"in": 2.0,   "out": 6.0,  "cache_read": 0.25,   "cache_write": 2.5},
     "qwen/qwen3.7-max":              {"in": 1.25,  "out": 3.75, "cache_read": 0.25,   "cache_write": 1.5625},
     "deepseek/deepseek-v4-pro":      {"in": 0.66,  "out": 1.98, "cache_read": 0.022,  "cache_write": 0.0},
@@ -327,6 +348,11 @@ _PRICING_DB = _load_json(PRICING_FILE, {}).get("models", {})
 # 已安装版本会保留用户自己的 pricing_overrides.json。关键官方修正也随脚本内置，
 # 这样升级后立即生效；用户仍可覆盖单价，已确认的官方别名保持固定映射。
 _BUILTIN_OVERRIDE_MODELS = {
+    # OpenAI Standard API rates, verified 2026-09-23:
+    # https://developers.openai.com/api/docs/pricing
+    **{model: dict(_DEFAULT_PRICES[model]) for model in (
+        "openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6-luna",
+    )},
     "openai/gpt-5.6-sol": {
         "in": 4.0, "out": 20.0, "cache_read": 0.4, "cache_write": 5.0,
     },
@@ -646,7 +672,7 @@ def nice_model(m: str) -> str:
         mt = re.search(r"gpt[- ]?(\d+(?:\.\d+)?)", s)
         version = mt.group(1) if mt else ""
         variant_labels = []
-        for token, label in (("sol", "Sol"), ("luna", "Luna"), ("terra", "Terra"),
+        for token, label in (("astra", "Astra"), ("sol", "Sol"), ("luna", "Luna"), ("terra", "Terra"),
                              ("mini", "Mini"), ("pro", "Pro")):
             if re.search(rf"(?:^|[-_/ ]){token}(?:$|[-_/ ])", s):
                 variant_labels.append(label)
@@ -750,7 +776,7 @@ _SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
 _SCAN_CACHE_VERSION = 21
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
-_CODEX_PARSER_VERSION = 7
+_CODEX_PARSER_VERSION = 8
 _CODEX_ACCOUNTING_VERSION = 7
 
 
@@ -1442,6 +1468,10 @@ def _empty_cmdcode():
 
 
 def _empty_zcode():
+    return _empty_opencode()
+
+
+def _empty_devin():
     return _empty_opencode()
 
 
@@ -3194,8 +3224,10 @@ def _codex_probe_record_header(data):
 
 
 def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
-                              model_limit=4 * 1024, start_offset=0, end_offset=None):
+                              model_limit=64 * 1024, start_offset=0, end_offset=None):
     """Yield model changes and token records without buffering unrelated large JSONL lines."""
+    # Recent permission profiles put payload.model beyond the old 4 KB prefix.
+    # Keep model probing bounded so large instructions never require full buffering.
     prefix = bytearray()
     candidate = None
     kind = None
@@ -3326,6 +3358,42 @@ def _iter_codex_token_lines(path, chunk_size=64 * 1024, header_limit=4 * 1024):
     for kind, value in _iter_codex_usage_records(path, chunk_size, header_limit):
         if kind == "token":
             yield value
+
+
+# 每轮扫描最多回填多少个会话的项目路径。
+#
+# cwd 就在会话文件第 0 行，但光是打开一个文件就要约 10ms——几千个历史会话
+# 合起来是几十秒，不能让升级后的第一次刷新扛下来。所以分摊到多轮，并且
+# 按最近活跃优先：项目足迹本来就按 last_active 排序，用户看得见的那几行
+# 第一轮就补齐，长尾在后台几分钟内自然补完。
+_CODEX_PROJECT_BACKFILL_PER_SCAN = 150
+
+
+def _codex_session_cwd(path, max_lines=8, max_line_bytes=128 * 1024):
+    """会话的工作目录。cwd 在文件头部的 session_meta 记录里，所以只读前几行——
+    为了一个字段重解析几千个会话文件是不值当的。
+
+    只认 session_meta 那一行：按 cwd 匹配会一路扫到后面的大事件行上去,
+    几千个会话累计起来就是几十秒。"""
+    try:
+        with open(path, "rb", buffering=0) as fh:
+            for _ in range(max_lines):
+                line = fh.readline(max_line_bytes)
+                if not line:
+                    break
+                if b'"session_meta"' not in line:
+                    continue
+                try:
+                    record = json.loads(line.decode("utf-8", errors="ignore"))
+                except Exception:
+                    continue
+                payload = record.get("payload")
+                cwd = payload.get("cwd") if isinstance(payload, dict) else record.get("cwd")
+                if isinstance(cwd, str) and cwd.startswith("/"):
+                    return cwd
+    except OSError:
+        return None
+    return None
 
 
 def _codex_session_meta(path, max_lines=20, max_line_bytes=2 * 1024 * 1024):
@@ -3612,7 +3680,7 @@ def scan_codex(bounds, cache):
                         lr = last.get("reasoning_output_tokens", 0) or 0
                         # 无模型字段(老版本 CLI 日志/截断会话)标为 unknown,不冒充 gpt-5.5;
                         # 计费仍按 gpt-5.5 保守估算(下行 price_model 兜底)
-                        model = _known_id_or_raw(file_model) or "unknown"
+                        model = _model_identity_id(file_model) or "unknown"
                         # 同一文件可先走主额度后切 Reserve:事件级额度优先于文件级模型。
                         if _codex_is_reserve_limits(rl):
                             model = _CODEX_RESERVE_MODEL
@@ -3696,6 +3764,15 @@ def scan_codex(bounds, cache):
     linked_paths = _codex_link_segment_mirrors(fc)
     if linked_paths:
         dedupe_paths.update(linked_paths)
+    # 项目路径按需补齐,让 Codex 参与项目足迹与回顾页。没读到也写空串占位,
+    # 免得每轮扫描都为同一批读不出 cwd 的会话重复开文件。
+    pending = [(str(entry.get("last_event_ts") or ""), f, entry)
+               for f, entry in fc.items()
+               if isinstance(entry, dict) and "proj" not in entry]
+    if pending:
+        pending.sort(reverse=True)      # 最近活跃的会话先补，排序用缓存里现成的时间戳
+        for _, f, entry in pending[:_CODEX_PROJECT_BACKFILL_PER_SCAN]:
+            entry["proj"] = _codex_session_cwd(f) or ""
         cache["_dirty"] = True
 
     # A session can briefly exist in active and archived directories together.
@@ -5326,6 +5403,7 @@ _PROVIDER_QUOTA_ENV = {
     "sub2api": "TOKEI_SUB2API_QUOTA",
     "zai": "TOKEI_ZAI_QUOTA",
     "antigravity": "TOKEI_ANTIGRAVITY_QUOTA",
+    "devin": "TOKEI_DEVIN_QUOTA",
 }
 
 
@@ -5336,7 +5414,7 @@ def _provider_quota_enabled(provider):
         return False
     if env == "1":
         return True
-    default = provider == "antigravity"
+    default = provider in ("antigravity", "devin")
     return bool(_tokei_config().get(f"{provider}_quota_enabled", default))
 
 
@@ -7145,6 +7223,212 @@ def scan_antigravity_quota():
     return fetch_antigravity_quota() if _provider_quota_enabled("antigravity") else {}
 
 
+# ---------- Devin（桌面端保存的套餐）----------
+# Devin.app 是改名后的 Windsurf 编辑器，本质是一个 VS Code fork，因此它的
+# globalStorage 就是一个普通 SQLite 文件，账号最近一次读到的套餐是其中一行。
+# 不需要任何凭据、不联网、不碰 Keychain，也不需要完全磁盘访问权限。
+_DEVIN_PLAN_KEY_PATTERNS = (
+    "windsurf.reactSettings.cachedPlanInfoData%",
+    "windsurf.settings.cachedPlanInfo%",
+)
+# 这一行是「启动时」写入的，不是运行中持续刷新的。所以读数的落款是那次启动，
+# 超过这个时长就按快照展示（卡片上会写“额度数据已过期”）而不是当作实时值。
+_DEVIN_SNAPSHOT_FRESH = 10 * 60
+# 超过一天没重启过，这行数据不再展示：解法就是打开 Devin，那会写入新的一行。
+_DEVIN_SNAPSHOT_MAX_AGE = 24 * 60 * 60
+
+
+def _devin_support_dir():
+    """含 state.vscdb 的支持目录，取最新的一个。"""
+    best = None
+    for root in DEVIN_SUPPORT_DIRS:
+        if not os.path.isfile(os.path.join(root, "User", "globalStorage", "state.vscdb")):
+            continue
+        try:
+            stamp = os.path.getmtime(root)
+        except OSError:
+            stamp = 0.0
+        if best is None or stamp > best[0]:
+            best = (stamp, root)
+    return best[1] if best else None
+
+
+def _devin_launch_stamp(name):
+    """logs/ 下每次运行建一个目录，目录名就是启动时刻：20260914T092003（本地时区）。
+
+    用目录名而不是目录的修改时间：修改时间会往后跑——在已有文件里追加不动它，
+    但会话进行一小时后新建的日志文件会把它顶上去，顶上去多少分钟，卡片就把
+    这份自启动起就没变过的读数少算多少分钟。
+    """
+    if not isinstance(name, str) or len(name) != 15:
+        return None
+    try:
+        parsed = datetime.strptime(name, "%Y%m%dT%H%M%S")
+    except ValueError:
+        return None
+    if parsed.strftime("%Y%m%dT%H%M%S") != name:
+        return None
+    return parsed.astimezone()
+
+
+def _devin_last_launch(support):
+    logs = os.path.join(support, "logs")
+    try:
+        entries = os.listdir(logs)
+    except OSError:
+        return None
+    newest = None
+    for name in entries:
+        if not os.path.isdir(os.path.join(logs, name)):
+            continue
+        stamp = _devin_launch_stamp(name)
+        if stamp is not None and (newest is None or stamp > newest):
+            newest = stamp
+    return newest
+
+
+def _devin_plan(db_path):
+    """(套餐, 本机账号行数)。
+
+    一台机器上登录过两个账号就会有两行，而文件里没有任何字段说明哪个是当前的。
+    取 endTimestamp 最远的一行：还在订阅期内的套餐优先于已过期的。
+    """
+    import sqlite3 as _sq
+
+    rows = []
+    conn = None
+    try:
+        conn = _sq.connect(_sqlite_ro_uri(db_path), uri=True, timeout=1)
+        conn.execute("PRAGMA query_only=ON")
+        for pattern in _DEVIN_PLAN_KEY_PATTERNS:
+            found = list(conn.execute(
+                "SELECT key, value FROM ItemTable WHERE key LIKE ?", (pattern,)))
+            if found:
+                rows = found
+                break
+    except Exception:
+        return None, 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+    best = None
+    parsed_rows = 0
+    for _key, value in rows:
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                value = bytes(value).decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+        try:
+            plan = json.loads(value)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(plan, dict):
+            continue
+        parsed_rows += 1
+        end = _provider_number(plan.get("endTimestamp")) or 0.0
+        if best is None or end > best[0]:
+            best = (end, plan)
+    return (best[1] if best else None), parsed_rows
+
+
+def _devin_plan_number(plan, field):
+    """布尔值也是数字类型的一种，True 会被读成 1。hideDailyQuota 走到这里会
+    变成 1%，所以布尔一律不当数字。"""
+    value = plan.get(field)
+    return None if isinstance(value, bool) else _provider_number(value)
+
+
+def _normalize_devin_plan(plan, launched_at, now=None, accounts=1):
+    """一行缓存的套餐在 now 时刻意味着什么。
+
+    没有可信落款的快照不展示，而不是拿抓取时刻替它落款：数据库自身的修改时间
+    被文件里其它每一个键刷新着，早餐时读到的数会显示成一秒前的。
+    """
+    now = int(now if now is not None else datetime.now().timestamp())
+    launched = int(launched_at.timestamp()) if launched_at is not None else None
+    if launched is None or launched > now or now - launched > _DEVIN_SNAPSHOT_MAX_AGE:
+        return {}
+
+    windows = []
+    # Devin 自己同时给出两个百分比和两个重置时刻，所以 used = 100 - remaining，
+    # 窗口长度也用它真的给了的那个，没有一处是推算出来的。
+    for field, reset_field, hide_field, window_id, title, minutes in (
+        ("dailyRemainingPercent", "dailyResetAtUnix", "hideDailyQuota",
+         "devin-daily", "日额度", 1440),
+        ("weeklyRemainingPercent", "weeklyResetAtUnix", "hideWeeklyQuota",
+         "devin-weekly", "周额度", 10080),
+    ):
+        if plan.get(hide_field):
+            continue
+        remaining = _devin_plan_number(plan, field)
+        if remaining is None:
+            # 不报日额度的套餐就不画这个环，而不是画一个满环。
+            continue
+        reset = _provider_epoch(plan.get(reset_field))
+        # 重置时刻已经过去的窗口直接丢掉而不是继续挂着：那个数字属于一个
+        # 已经不存在的窗口。另一个窗口和余额（本来就没有重置）照常保留。
+        if reset is not None and reset <= now:
+            continue
+        windows.append(_provider_window(window_id, title, 100 - remaining, reset, minutes))
+
+    # 免费套餐给的是一池消息数。-1 是付费套餐表示「不适用」的写法，不是计数，
+    # 按计数读会画出「负一分之负一」，所以任一端为负都按没有这项处理。
+    total = _devin_plan_number(plan, "totalMessages")
+    remaining_messages = _devin_plan_number(plan, "remainingMessages")
+    if (total is not None and remaining_messages is not None
+            and total > 0 and remaining_messages >= 0):
+        windows.append(_provider_window(
+            "devin-messages", "消息额度",
+            (total - remaining_messages) / total * 100, None, None,
+            f"剩余 {int(remaining_messages):,} / {int(total):,} 条"))
+
+    details = []
+    # 字段名就写了是 micros：10,000,000 即十美元。
+    balance = _devin_plan_number(plan, "overageBalanceMicros")
+    if balance is not None:
+        details.append({"label": "超额余额", "value": _provider_money(balance / 1_000_000)})
+    if accounts > 1:
+        details.append({"label": "本机账号", "value": f"{accounts} 个",
+                        "secondary": "取订阅期最长的一个"})
+
+    if not windows and not details:
+        return {}
+
+    plan_name = plan.get("planName")
+    plan_name = plan_name.strip() if isinstance(plan_name, str) and plan_name.strip() else None
+    # 这一行自己带了人类可读的账号（实测形如 "someone@example.com - My Team"），
+    # 比键里那串 user-<32 hex> 有用得多；没有就留空，不拿那串 id 顶上。
+    account = plan.get("accountIdentityText")
+    account = account.strip() if isinstance(account, str) and account.strip() else None
+    return {
+        "available": True,
+        "plan": f"Devin {plan_name}" if plan_name else None,
+        "account": account,
+        "windows": windows,
+        "details": details,
+        "source": "devin-app-cache",
+        "updated": launched,
+        "stale": now - launched > _DEVIN_SNAPSHOT_FRESH,
+    }
+
+
+def fetch_devin_quota():
+    support = _devin_support_dir()
+    if not support:
+        return {}
+    plan, accounts = _devin_plan(
+        os.path.join(support, "User", "globalStorage", "state.vscdb"))
+    if not plan:
+        return {}
+    return _normalize_devin_plan(plan, _devin_last_launch(support), accounts=accounts)
+
+
+def scan_devin_quota():
+    return fetch_devin_quota() if _provider_quota_enabled("devin") else {}
+
+
 def scan_provider_quotas(errors=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -7153,6 +7437,7 @@ def scan_provider_quotas(errors=None):
         "sub2api": scan_sub2api_quota,
         "zai": scan_zai_quota,
         "antigravity": scan_antigravity_quota,
+        "devin": scan_devin_quota,
     }
     result = {name: {} for name in (*all_scans, "cursor", "grok_bot")}
     scans = {name: scan for name, scan in all_scans.items()
@@ -7651,6 +7936,7 @@ def _scan_hermes_db(db_path, _sq):
             SELECT s.id AS session_id,
                    {expr('s', session_columns, 'started_at')} AS started_at,
                    {expr('s', session_columns, 'model', "''")} AS model,
+                   {expr('s', session_columns, 'cwd', "''")} AS cwd,
                    {expr('s', session_columns, 'input_tokens')} AS input_tokens,
                    {expr('s', session_columns, 'output_tokens')} AS output_tokens,
                    {expr('s', session_columns, 'cache_read_tokens')} AS cache_read_tokens,
@@ -7791,6 +8077,17 @@ def _scan_hermes_db(db_path, _sq):
             day["hours"][local_dt.hour] += inp + out + cr + cw + reason
             if session_id in sessions:
                 day_sessions.setdefault(dk, set()).add(session_id)
+            workdir = (sessions.get(session_id) or {}).get("cwd")
+            if isinstance(workdir, str) and workdir.startswith("/"):
+                bucket = day.setdefault("projects", {}).setdefault(
+                    workdir, {"tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
+                total = inp + out + cr + cw + reason
+                bucket["tokens"] += total
+                bucket["cost"] += row_cost(row)
+                model_id = _model_identity_id(row.get("model")) or "unknown"
+                bucket["models"][model_id] = bucket["models"].get(model_id, 0) + total
+                if session_id and session_id not in bucket["sessions"]:
+                    bucket["sessions"].append(str(session_id))
 
         for dk, session_ids in day_sessions.items():
             days[dk]["sessions"] = len(session_ids)
@@ -8158,6 +8455,10 @@ def scan_qodercli(bounds, cache):
     return {"ranges": B, "model": fc.get("_model")}
 
 
+# 解析口径版本。加 1 可让旧缓存失效重扫（例如新增了按项目的用量拆分）。
+_HERMES_SCAN_VERSION = 2
+
+
 def scan_hermes(bounds, cache):
     import sqlite3 as _sq
     ledger_touch("hermes")
@@ -8179,9 +8480,10 @@ def scan_hermes(bounds, cache):
         if not sig:
             continue
         entry = fc.get(db_path)
-        if not entry or entry.get("sig") != sig:
+        if (not entry or entry.get("sig") != sig
+                or entry.get("version") != _HERMES_SCAN_VERSION):
             days = _scan_hermes_db(db_path, _sq)
-            fc[db_path] = {"sig": sig, "days": days}
+            fc[db_path] = {"sig": sig, "days": days, "version": _HERMES_SCAN_VERSION}
             changed = True
     for p in stale:
         fc.pop(p, None)
@@ -9827,6 +10129,17 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
     connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
     try:
         connection.execute("PRAGMA query_only=ON")
+        # 会话自带工作目录，让 OpenCode / MiMoCode 参与项目足迹与回顾页。
+        session_projects = {}
+        session_columns = {row[1] for row in connection.execute("PRAGMA table_info(session)")}
+        if {"id", "directory"} <= session_columns:
+            try:
+                for session_id, directory in connection.execute(
+                        "SELECT id, directory FROM session"):
+                    if isinstance(directory, str) and directory.startswith("/"):
+                        session_projects[session_id] = directory
+            except sqlite3.Error:
+                pass
         rows = connection.execute("SELECT id, session_id, time_created, data FROM message")
         for message_id, session_id, created_ms, raw in rows:
             try:
@@ -9851,6 +10164,20 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
                 target["hours"][hour] += amount
             if day.get("session"):
                 sessions.setdefault(day_key, set()).add(day["session"])
+            proj_path = session_projects.get(session_id)
+            if proj_path:
+                bucket = target.setdefault("projects", {}).setdefault(
+                    proj_path, {"tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
+                total = day["in"] + day["out"] + day["cr"] + day["cw"] + day["reason"]
+                bucket["tokens"] += total
+                bucket["cost"] += day["cost"]
+                for model, usage in day["models"].items():
+                    amount = (usage["in"] + usage["out"] + usage["cr"]
+                              + usage["cw"] + usage["reason"])
+                    bucket["models"][model] = bucket["models"].get(model, 0) + amount
+                marker = day.get("session") or session_id
+                if marker and marker not in bucket["sessions"]:
+                    bucket["sessions"].append(str(marker))
     finally:
         connection.close()
     for day_key, ids in sessions.items():
@@ -10071,6 +10398,203 @@ def scan_zcode(bounds, cache):
     return {"ranges": B}
 
 
+# ---------- Devin CLI ----------
+# SQLite: ~/.local/share/devin/cli/sessions.db。
+# message_nodes.chat_message 是整条消息的 JSON，assistant 那条在 metadata.metrics
+# 里带着自己的用量：
+#
+#   {"role":"assistant","metadata":{"generation_model":"…","created_at":…,
+#     "metrics":{"input_tokens":11486,"output_tokens":254,
+#                "cache_read_tokens":6450,"cache_creation_tokens":null}}}
+#
+# input_tokens 与两个缓存桶并列（Anthropic 的口径），不做相减。
+# 这和桌面端的套餐缓存是两个互不相干的库：一个是 CLI 自己的对话记录，
+# 一个是账号额度，彼此不知道对方的存在。
+# 计量口径版本。改动解析口径时 +1：账本按 _cost_version 取新不取大，
+# 否则被高水位规则记下的旧数（例如兄弟节点翻倍那版）会一直压住修正后的值。
+# 同一个常量也用作扫描缓存的版本，两边一起失效。
+_DEVIN_COST_VERSION = 3
+
+
+def _devin_cli_db_path():
+    return _first_existing_file(DEVIN_CLI_DB_PATHS)
+
+
+def _scan_devin_cli_database(path):
+    import sqlite3
+
+    def number(value):
+        try:
+            return max(int(value or 0), 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    days = {}
+    sessions = {}
+    seen = set()
+    connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "message_nodes" not in tables:
+            return {}
+
+        # 会话表给出模型兜底（generation_model 缺失时用会话声明的模型）
+        # 与项目路径（working_directory），后者让 Devin 参与项目足迹与回顾页。
+        session_models, session_projects = {}, {}
+        if "sessions" in tables:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
+            if "id" in columns:
+                directory = "working_directory" if "working_directory" in columns else "NULL"
+                model_col = "model" if "model" in columns else "NULL"
+                try:
+                    for session_id, model, workdir in connection.execute(
+                            f"SELECT id, {model_col}, {directory} FROM sessions"):
+                        if isinstance(model, str) and model.strip():
+                            session_models[session_id] = model.strip()
+                        if isinstance(workdir, str) and workdir.startswith("/"):
+                            session_projects[session_id] = workdir
+                except sqlite3.Error:
+                    pass
+
+        # node_id 只在合并键的兜底分支里用到，老版本没有这一列也能读。
+        columns = {row[1] for row in connection.execute(
+            "PRAGMA table_info(message_nodes)")}
+        if not {"session_id", "chat_message", "created_at"} <= columns:
+            return {}
+        node = "node_id" if "node_id" in columns else "rowid"
+        rows = connection.execute(f"""
+            SELECT session_id, {node}, chat_message, created_at
+            FROM message_nodes
+            ORDER BY created_at ASC, {node} ASC
+        """)
+        for session_id, node_id, message, created_at in rows:
+            if isinstance(message, (bytes, bytearray)):
+                try:
+                    message = bytes(message).decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+            try:
+                root = json.loads(message)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(root, dict):
+                continue
+            metadata = root.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            metrics = metadata.get("metrics")
+            if not isinstance(metrics, dict):
+                continue
+
+            input_total = number(metrics.get("input_tokens"))
+            output_total = number(metrics.get("output_tokens"))
+            cache_read = number(metrics.get("cache_read_tokens"))
+            cache_write = number(metrics.get("cache_creation_tokens"))
+            if input_total + output_total + cache_read + cache_write <= 0:
+                continue
+
+            # 时刻优先取消息自己的 created_at（ISO 字符串，微秒精度，是这次回复
+            # 真正的时间）；行上的 created_at 只精确到秒，作兜底。缺时间戳的
+            # 消息跳过，不拿文件修改时间顶替。
+            stamp_source = metadata.get("created_at")
+            stamp = _provider_epoch(stamp_source)
+            if stamp is None:
+                stamp_source = None
+                stamp = _provider_epoch(created_at)
+            if stamp is None or stamp <= 0:
+                continue
+            try:
+                created = datetime.fromtimestamp(stamp).astimezone()
+            except (OSError, OverflowError, ValueError):
+                continue
+
+            model = metadata.get("generation_model")
+            model = model.strip() if isinstance(model, str) and model.strip() else None
+            model = model or session_models.get(session_id)
+
+            # message_nodes 是一片森林：同一次回复会被写进共用一个 parent 的
+            # 两个兄弟节点，metrics 与 metadata.created_at 完全一致。照单全收
+            # 会把用量翻一倍（实测如此），所以同一会话里「同一微秒时刻 + 同一
+            # 组 metrics + 同一模型」只计一次。两次不同的调用不会既同时刻又
+            # 同用量；而没有微秒落款可比时退回按节点计，宁可不合并也不丢数。
+            key = (session_id, stamp_source if stamp_source is not None else node_id,
+                   model, input_total, output_total, cache_read, cache_write)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            display_model = (_known_id_or_raw(model) or model) if model else "devin"
+            cost = 0.0
+            price_id = _pricing_id(model) if model else None
+            if price_id:
+                price = _raw_price(price_id)
+                cost = (input_total / 1e6 * price["in"]
+                        + output_total / 1e6 * price["out"]
+                        + cache_read / 1e6 * price["cache_read"]
+                        + cache_write / 1e6 * price["cache_write"])
+
+            day_key = created.date().isoformat()
+            day = days.setdefault(day_key, _empty_token_day())
+            day["_cost_version"] = _DEVIN_COST_VERSION
+            _add_token_usage(day, input_total, output_total, cache_read, cache_write,
+                             0, cost, display_model)
+            proj_path = session_projects.get(session_id)
+            if proj_path:
+                by_project = day.setdefault("projects", {})
+                bucket = by_project.setdefault(
+                    proj_path, {"tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
+                total = input_total + output_total + cache_read + cache_write
+                bucket["tokens"] += total
+                bucket["cost"] += cost
+                bucket["models"][display_model] = \
+                    bucket["models"].get(display_model, 0) + total
+                if session_id not in bucket["sessions"]:
+                    bucket["sessions"].append(str(session_id))
+            day["hours"][created.hour] += input_total + output_total + cache_read + cache_write
+            sessions.setdefault(day_key, set()).add(str(session_id or "unknown"))
+    finally:
+        connection.close()
+    for day_key, session_ids in sessions.items():
+        days[day_key]["sessions"] = sorted(session_ids)
+    return days
+
+
+def scan_devin(bounds, cache):
+    ledger_touch("devin")
+    fc = cache.setdefault("devin", {})
+    B = _empty_token_ranges()
+    db_path = _devin_cli_db_path()
+    if not db_path:
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
+        return {"ranges": B}
+
+    db_path = os.path.realpath(db_path)
+    cache_key = "db:" + db_path
+    signature = _sqlite_signature(db_path)
+    entry = fc.get(cache_key)
+    if not entry or entry.get("sig") != signature \
+            or entry.get("version") != _DEVIN_COST_VERSION:
+        entry = {"sig": signature, "days": _scan_devin_cli_database(db_path),
+                 "version": _DEVIN_COST_VERSION}
+        fc.clear()
+        fc[cache_key] = entry
+        cache["_dirty"] = True
+
+    for day_key, day in ledger_reconcile("devin", entry.get("days", {})).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
+    return {"ranges": B}
+
+
 # ---------- MiMoCode ----------
 # MiMoCode uses the OpenCode message schema and XDG data-directory rules.
 def _mimocode_data_dirs():
@@ -10108,6 +10632,10 @@ def _mimocode_db_paths():
     return []
 
 
+# 解析口径版本。加 1 可让旧缓存失效重扫（例如新增了按项目的用量拆分）。
+_MIMOCODE_SCAN_VERSION = 2
+
+
 def scan_mimocode(bounds, cache):
     ledger_touch("mimocode")
     fc = cache.setdefault("mimocode", {})
@@ -10123,9 +10651,10 @@ def scan_mimocode(bounds, cache):
     cache_key = "db:" + db_path
     signature = _sqlite_signature(db_path)
     entry = fc.get(cache_key)
-    if not entry or entry.get("sig") != signature or entry.get("version") != 1:
+    if (not entry or entry.get("sig") != signature
+            or entry.get("version") != _MIMOCODE_SCAN_VERSION):
         days, _ = _scan_opencode_database(db_path, estimate_missing_cost=True)
-        entry = {"sig": signature, "days": days, "version": 1}
+        entry = {"sig": signature, "days": days, "version": _MIMOCODE_SCAN_VERSION}
         fc.clear()
         fc[cache_key] = entry
         cache["_dirty"] = True
@@ -11892,6 +12421,7 @@ def compute():
     qcli = _safe_scan("qodercli", lambda: scan_qodercli(bounds, cache), _empty_qodercli, errors)
     hm = _safe_scan("hermes", lambda: scan_hermes(bounds, cache), _empty_hermes, errors)
     zc = _safe_scan("zcode", lambda: scan_zcode(bounds, cache), _empty_zcode, errors)
+    dv = _safe_scan("devin", lambda: scan_devin(bounds, cache), _empty_devin, errors)
     mc = _safe_scan("mimocode", lambda: scan_mimocode(bounds, cache), _empty_mimocode, errors)
     oc = _safe_scan("openclaw", lambda: scan_openclaw(bounds, cache), _empty_openclaw, errors)
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
@@ -12054,6 +12584,7 @@ def compute():
     piranges = {k: token_usage_range(pi["ranges"][k]) for k in RANGE_KEYS}
     paranges = {k: token_usage_range(prime["ranges"][k]) for k in RANGE_KEYS}
     zcranges = {k: token_usage_range(zc["ranges"][k]) for k in RANGE_KEYS}
+    dvranges = {k: token_usage_range(dv["ranges"][k]) for k in RANGE_KEYS}
     mcranges = {k: token_usage_range(mc["ranges"][k]) for k in RANGE_KEYS}
     wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
     wbairanges = {k: token_usage_range(wbai["ranges"][k]) for k in RANGE_KEYS}
@@ -12141,6 +12672,10 @@ def compute():
             "ranges": granges,
         },
         "antigravity": provider_quotas["antigravity"],
+        "devin": {
+            "ranges": dvranges,
+            "quota": provider_quotas["devin"],
+        },
         "cursor": provider_quotas["cursor"],
         "zed": provider_quotas["zed"],
         "sub2api": provider_quotas["sub2api"],
@@ -12235,7 +12770,7 @@ def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
     for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy",
                      "workbuddy_ai", "codebuddy",
-                     "deepseek_harness", "qwencode"):
+                     "deepseek_harness", "qwencode", "devin"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -12286,7 +12821,7 @@ def _recalc_costs(result):
                     cost = authoritative_cost or (
                         ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
                         + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
-                elif tool_key in ("hermes", "zcode", "mimocode"):
+                elif tool_key in ("hermes", "zcode", "mimocode", "devin"):
                     cr = m.get("cr", 0)
                     cw = m.get("cw", 0)
                     reason = m.get("reason", 0)
@@ -12977,7 +13512,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
 
     _empty = lambda: {"claude": 0.0, "codex": 0.0, "codex_reserve": 0.0,
                        "gemini": 0.0, "grok": 0.0,
-                       "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
+                       "zcode": 0.0, "mimocode": 0.0, "devin": 0.0, "pi": 0.0,
                        "workbuddy": 0.0, "workbuddy_ai": 0.0, "codebuddy": 0.0,
                        "deepseek_harness": 0.0,
                        "opencode": 0.0, "qwencode": 0.0, "kimicode": 0.0,
@@ -13141,7 +13676,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             for key in TOKEN_FIELDS:
                 m[key] += mv.get(key, 0)
 
-    for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode")):
+    for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode"),
+                             ("devin", "Devin")):
         for dk, day_data in _iter_cached_token_days(cache.get(tool_key, {})):
             if cutoff and dk < cutoff:
                 continue
@@ -13354,7 +13890,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     # 输出结构保持完全不变(qoderwork/qoder_ide/qodercli 无成本列,只参与 token 合并)。
     _LEDGER_COST_COLUMNS = frozenset((
         "claude", "codex", "codex_reserve", "gemini", "grok", "hermes", "openclaw", "zcode",
-        "mimocode", "pi", "workbuddy", "workbuddy_ai", "codebuddy", "deepseek_harness",
+        "mimocode", "devin", "pi", "workbuddy", "workbuddy_ai", "codebuddy", "deepseek_harness",
         "opencode", "qwencode", "musecode", "cmdcode"))
     for tool, tool_days in _load_ledger().get("tools", {}).items():
         if not isinstance(tool_days, dict):
@@ -13407,7 +13943,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "gemini": round(v["gemini"], 2), "grok": round(v["grok"], 2),
               "hermes": round(v["hermes"], 2),
               "openclaw": round(v["openclaw"], 2),
-              "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2), "pi": round(v["pi"], 2),
+              "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2),
+              "devin": round(v["devin"], 2), "pi": round(v["pi"], 2),
               "workbuddy": round(v["workbuddy"], 2),
               "workbuddy_ai": round(v["workbuddy_ai"], 2),
               "codebuddy": round(v["codebuddy"], 2),
@@ -13423,7 +13960,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                              + v["codebuddy"]
                              + v["deepseek_harness"] + v["opencode"] + v["qwencode"]
                              + v["kimicode"] + v["musecode"] + v["cmdcode"] + v["prime_agent"] + v["hermes"]
-                             + v["openclaw"], 2),
+                             + v["openclaw"] + v["devin"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "xr_in": v["xr_in"], "xr_out": v["xr_out"],
@@ -13686,8 +14223,9 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             name = f"{nice_model(model)} (OpenCode)"
             model_tok[name] = model_tok.get(name, 0) + token_total(usage)
 
-    # --- ZCode / MiMoCode ---
-    for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode")):
+    # --- ZCode / MiMoCode / Devin ---
+    for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode"),
+                             ("devin", "Devin")):
         for dk, day in _iter_cached_token_days(cache.get(tool_key, {})):
             if cutoff and dk < cutoff:
                 continue
@@ -13911,6 +14449,14 @@ def build_wrapped(period="all", refresh=True, _cache=None):
     # (天级整取整用;账本理论上 ≥ 实时,max 只是保险)。token 按白名单口径求和(含 cached/thoughts,
     # 见 _ledger_token_sum),cost 同理逐日取 max。被清理日志的历史天由账本兜底补回,
     # 让 total/active/streak/busiest/peak 与 peak_days 同口径,避免同页口径分裂。
+    # 每日项目与项目足迹同源：谁出现在项目足迹，谁就出现在回顾页，不会一边有
+    # 一边没有。账本归档的项目名在下面并入，负责日志被清理后的历史天。
+    for day_key, names in _project_day_names(cache).items():
+        if cutoff and day_key < cutoff:
+            continue
+        if names:
+            day_projs.setdefault(day_key, set()).update(names)
+
     ledger_day_tokens = {}
     ledger_day_cost = {}
     for tool, tool_days in _load_ledger().get("tools", {}).items():
@@ -14568,219 +15114,199 @@ def dashboard():
     print(json.dumps(build_dashboard(_arg_period()), ensure_ascii=False))
 
 
-def projects():
-    """项目足迹:从缓存聚合所有项目路径、活跃时间、session 数、token、成本。"""
-    compute()
-    cache = _load_scan_cache()
+# ---------- 项目维度：唯一数据源 ----------
+# 项目足迹页与 Wrapped 的每日项目都从 _project_contributions 派生。历史上两边
+# 各写各的，结果 pi 只出现在项目足迹、grok 只出现在项目足迹而不在回顾页，
+# WorkBuddy 的回顾页项目名还是会话时间戳目录而不是真实项目——同一份事实分两处
+# 维护必然分裂。这里合成一股流，两个页面消费同一个来源。
+#
+# 接入一个新 harness：让它的 scanner 在缓存条目上写 proj（项目绝对路径），
+# 再在 _PROJECT_SOURCES 加一行，两个页面同时生效，不必各改一遍。
+#
+# session 取值：
+#   "entry" —— 一个缓存条目就是一次会话，按条目计数；
+#   "sid"   —— 条目上的 sid 才是会话标识，跨条目去重（一次会话写多个文件）。
+# tokens 用哪个函数数：多数工具用 token_total，Muse Code 的推理并进输出，
+# 口径不同，所以按工具指定，避免统一成一个"差不多"的算法。
+_PROJECT_SOURCES = (
+    # tool_key,      显示名,            记成本, session, token 计数
+    ("claude",       "Claude",          True,  "entry", "token_total"),
+    ("codex",        "Codex",           True,  "entry", "token_total"),
+    ("pi",           "Pi",              True,  "entry", "token_total"),
+    ("prime_agent",  "Prime Agent",     True,  "entry", "token_total"),
+    # Kimi 的 wire 不持久化真实成本，卡片也刻意不显示，这里同样不记。
+    ("kimicode",     "Kimi Code",       False, "sid",   "token_total"),
+    ("musecode",     "Muse Code",       True,  "sid",   "_muse_token_total"),
+    ("cmdcode",      "Command Code",    True,  "sid",   "token_total"),
+)
 
-    proj_map = {}  # path → {sessions, tokens, cost, last_active, model_tok}
+# 第二种形状：一个库里装着多个项目（数据库型工具）。项目挂在「天」上：
+#   entry["days"][日期]["projects"][项目路径] = {tokens, cost, models, sessions}
+# 一文件一会话的工具用上面 _PROJECT_SOURCES 的形状，两种都走同一个贡献流。
+_PROJECT_DAY_SOURCES = (
+    # tool_key,  显示名
+    ("devin",    "Devin"),
+    ("hermes",   "Hermes"),
+    ("opencode", "OpenCode"),
+    ("mimocode", "MiMoCode"),
+)
 
-    # Claude sessions
-    for f, entry in cache.get("claude", {}).items():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["sessions"] += 1
-        p["tools"].add("claude")
-        for dk, day in entry.get("days", {}).items():
-            tok = token_total(day)
-            p["tokens"] += tok
-            p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for mn, mv in day.get("models", {}).items():
-                nm = nice_model(mn)
-                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
+# 缓存是 records 而非 days 的工具，各自的去重逻辑已在迭代器里。
+_PROJECT_RECORD_SOURCES = (
+    ("workbuddy",        "WorkBuddy",        "_iter_workbuddy_records",        None),
+    ("workbuddy_ai",     "WorkBuddy Intl.",  "_iter_workbuddy_records",        None),
+    ("codebuddy",        "CodeBuddy",        "_iter_workbuddy_records",        None),
+    ("deepseek_harness", "DeepSeek Harness", "_iter_deepseek_harness_records", "deepseek-v4-pro"),
+)
 
-    # Pi sessions
-    for f, entry in cache.get("pi", {}).items():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["sessions"] += 1
-        p["tools"].add("pi")
-        for dk, day in entry.get("days", {}).items():
-            tok = token_total(day)
-            p["tokens"] += tok
-            p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for mn, mv in day.get("models", {}).items():
-                nm = f"{nice_model(mn)} (Pi)"
-                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
 
-    # Prime Agent sessions
-    for f, entry in cache.get("prime_agent", {}).items():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["sessions"] += 1
-        p["tools"].add("prime_agent")
-        for dk, day in entry.get("days", {}).items():
-            tok = token_total(day)
-            p["tokens"] += tok; p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]: p["last_active"] = dk
-            for mn, mv in day.get("models", {}).items():
-                nm = f"{nice_model(mn)} (Prime Agent)"
-                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
+def _project_contribution(tool, label, path, day, tokens, cost, models, session,
+                          cost_cny=0.0):
+    return {"tool": tool, "label": label, "path": path, "day": day or "",
+            "tokens": int(tokens or 0), "cost": float(cost or 0.0),
+            "cost_cny": float(cost_cny or 0.0),
+            "models": models or {}, "session": session}
 
-    # WorkBuddy 国内版与国际版 sessions
-    for tool_key, suffix in (("workbuddy", "WorkBuddy"),
-                             ("workbuddy_ai", "WorkBuddy Intl."),
-                             ("codebuddy", "CodeBuddy")):
-        workbuddy_sessions = {}
-        for _, entry, record in _iter_workbuddy_records(cache.get(tool_key, {})):
+
+def _project_contributions(cache):
+    """项目维度的原子贡献流，供项目足迹与 Wrapped 共用。
+
+    每条是「某工具在某项目某天产生了多少 token / 成本 / 哪些模型 / 属于哪次会话」。
+    """
+    for tool_key, label, with_cost, session_mode, counter_name in _PROJECT_SOURCES:
+        count = globals().get(counter_name, token_total)
+        tool_cache = cache.get(tool_key)
+        if not isinstance(tool_cache, dict):
+            continue
+        for entry_key, entry in tool_cache.items():
+            if not isinstance(entry, dict):
+                continue
             proj_path = entry.get("proj") or ""
             if not proj_path or proj_path == "?":
                 continue
-            p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                                 "last_active": "", "model_tok": {}, "tools": set()})
-            p["tools"].add(tool_key)
-            p["tokens"] += token_total(record)
-            p["cost"] += record.get("cost", 0)
-            dk = record.get("date", "")
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            model_name = f"{nice_model(record.get('model', 'unknown'))} ({suffix})"
-            p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
-            workbuddy_sessions.setdefault(proj_path, set()).add(
-                record.get("session") or entry.get("sid"))
-    for proj_path, session_ids in workbuddy_sessions.items():
-            proj_map[proj_path]["sessions"] += len(session_ids)
+            session = entry.get("sid") if session_mode == "sid" else entry_key
+            for day_key, day in (entry.get("days") or {}).items():
+                if not isinstance(day, dict):
+                    continue
+                models = {f"{nice_model(name)} ({label})": count(usage)
+                          for name, usage in (day.get("models") or {}).items()}
+                yield _project_contribution(
+                    tool_key, label, proj_path, day_key, count(day),
+                    day.get("cost", 0) if with_cost else 0.0, models, session)
 
-    # DeepSeek Harness sessions
-    deepseek_sessions = {}
-    for _, entry, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
+    for tool_key, label, iterator_name, default_model in _PROJECT_RECORD_SOURCES:
+        iterator = globals().get(iterator_name)
+        tool_cache = cache.get(tool_key)
+        if not callable(iterator) or not isinstance(tool_cache, dict):
             continue
+        for entry_path, entry, record in iterator(tool_cache):
+            proj_path = entry.get("proj") or ""
+            if not proj_path or proj_path == "?":
+                continue
+            model_name = record.get("model") or default_model or "unknown"
+            tokens = token_total(record)
+            yield _project_contribution(
+                tool_key, label, proj_path, record.get("date"), tokens,
+                record.get("cost", 0),
+                {f"{nice_model(model_name)} ({label})": tokens},
+                record.get("session") or entry.get("sid") or entry_path,
+                cost_cny=record.get("cost_cny", 0))
+
+    for tool_key, label in _PROJECT_DAY_SOURCES:
+        tool_cache = cache.get(tool_key)
+        if not isinstance(tool_cache, dict):
+            continue
+        for entry in tool_cache.values():
+            if not isinstance(entry, dict):
+                continue
+            for day_key, day in (entry.get("days") or {}).items():
+                if not isinstance(day, dict):
+                    continue
+                by_project = day.get("projects")
+                if not isinstance(by_project, dict):
+                    continue    # 名字列表是给账本归档用的，不是这里的按项目用量
+                for proj_path, usage in by_project.items():
+                    if not proj_path or not isinstance(usage, dict):
+                        continue
+                    models = {f"{nice_model(name)} ({label})": int(amount or 0)
+                              for name, amount in (usage.get("models") or {}).items()}
+                    session_ids = [sid for sid in (usage.get("sessions") or []) if sid]
+                    yield _project_contribution(
+                        tool_key, label, proj_path, day_key,
+                        usage.get("tokens", 0), usage.get("cost", 0), models,
+                        tuple(session_ids))
+
+    # Grok 的缓存已经是「按天按项目」的富结构，直接转成同一种贡献。
+    grok_cache = cache.get("grok")
+    if isinstance(grok_cache, dict):
+        for entry in grok_cache.values():
+            if not isinstance(entry, dict):
+                continue
+            proj_path = entry.get("project") or ""
+            if not proj_path:
+                continue
+            # 只带会话与日期，token 由下面按天的那份给出，避免重复计数。
+            yield _project_contribution(
+                "grok", "Grok Build", proj_path, entry.get("date"), 0, 0.0, {},
+                entry.get("sid"))
+    grok_days = cache.get(_GROK_DAYS_CACHE_KEY)
+    if isinstance(grok_days, dict):
+        for day_key, day in grok_days.items():
+            if not isinstance(day, dict):
+                continue
+            for proj_path, usage in (day.get("projects") or {}).items():
+                if not proj_path:
+                    continue
+                models = {f"{nice_model(name)} (Grok Build)": int(amount or 0)
+                          for name, amount in (usage.get("models") or {}).items()}
+                sessions = [sid for sid in (usage.get("sessions") or []) if sid]
+                yield _project_contribution(
+                    "grok", "Grok Build", proj_path, day_key,
+                    usage.get("tokens", 0), usage.get("cost", 0), models,
+                    sessions[0] if len(sessions) == 1 else tuple(sessions))
+
+
+def _project_day_names(cache):
+    """{日期: {项目名}}。Wrapped 的每日项目由此而来，与项目足迹同源。"""
+    names = {}
+    for hit in _project_contributions(cache):
+        if not hit["day"]:
+            continue
+        name = os.path.basename(hit["path"].rstrip("/")) or hit["path"]
+        names.setdefault(hit["day"], set()).add(name)
+    return names
+
+
+def projects():
+    """项目足迹:从缓存聚合所有项目路径、活跃时间、session 数、token、成本。
+
+    数据来自 _project_contributions —— 和 Wrapped 的每日项目同一个来源。
+    """
+    compute()
+    cache = _load_scan_cache()
+
+    proj_map = {}   # path → {sessions, tokens, cost, last_active, model_tok, tools}
+    sessions = {}   # path → {会话标识}
+    for hit in _project_contributions(cache):
+        proj_path = hit["path"]
         p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("deepseek_harness")
-        p["tokens"] += token_total(record)
-        p["cost"] += record.get("cost", 0)
-        p["cost_cny"] = p.get("cost_cny", 0) + record.get("cost_cny", 0)
-        dk = record.get("date", "")
-        if dk > p["last_active"]:
-            p["last_active"] = dk
-        model_name = f"{nice_model(record.get('model', 'deepseek-v4-pro'))} (DeepSeek Harness)"
-        p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
-        deepseek_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
-    for proj_path, session_ids in deepseek_sessions.items():
-        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
-
-    # Kimi Code sessions. protocol 1.5 writes one wire per Agent, so count the
-    # shared state.json session id once while summing every Agent's usage.
-    kimi_sessions = {}
-    for entry in cache.get("kimicode", {}).values():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("kimicode")
-        kimi_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
-        for dk, day in entry.get("days", {}).items():
-            p["tokens"] += token_total(day)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for model, usage in day.get("models", {}).items():
-                name = f"{nice_model(model)} (Kimi Code)"
-                p["model_tok"][name] = p["model_tok"].get(name, 0) + token_total(usage)
-    for proj_path, session_ids in kimi_sessions.items():
-        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
-
-    # Muse Code sessions. one session.jsonl per session, count the stream id once.
-    muse_sessions = {}
-    for entry in cache.get("musecode", {}).values():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("musecode")
-        muse_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
-        for dk, day in entry.get("days", {}).items():
-            p["tokens"] += _muse_token_total(day)
-            p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for model, usage in day.get("models", {}).items():
-                name = f"{nice_model(model)} (Muse Code)"
-                p["model_tok"][name] = p["model_tok"].get(name, 0) + _muse_token_total(usage)
-    for proj_path, session_ids in muse_sessions.items():
-        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
-
-    # Command Code sessions. one transcript per session id, count the session id once.
-    cmdcode_sessions = {}
-    for entry in cache.get("cmdcode", {}).values():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("cmdcode")
-        cmdcode_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
-        for dk, day in entry.get("days", {}).items():
-            p["tokens"] += token_total(day)
-            p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for model, usage in day.get("models", {}).items():
-                name = f"{nice_model(model)} (Command Code)"
-                p["model_tok"][name] = p["model_tok"].get(name, 0) + token_total(usage)
-    for proj_path, session_ids in cmdcode_sessions.items():
-        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
-
-    # Grok Build sessions + unified 日志真实 token，直接复用主刷新缓存。
-    grok_project_sessions = {}
-    for entry in cache.get("grok", {}).values():
-        if not isinstance(entry, dict):
-            continue
-        grok_path = entry.get("project") or ""
-        if not grok_path:
-            continue
-        p = proj_map.setdefault(grok_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("grok")
-        grok_project_sessions.setdefault(grok_path, set()).add(entry.get("sid"))
-        dk = entry.get("date") or ""
-        if dk > p["last_active"]:
-            p["last_active"] = dk
-    for dk, day in cache.get(_GROK_DAYS_CACHE_KEY, {}).items():
-        for grok_path, usage in day.get("projects", {}).items():
-            p = proj_map.setdefault(grok_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                                 "last_active": "", "model_tok": {}, "tools": set()})
-            p["tools"].add("grok")
-            p["tokens"] += int(usage.get("tokens", 0) or 0)
-            p["cost"] += float(usage.get("cost", 0) or 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            session_ids = {sid for sid in usage.get("sessions", []) if sid}
-            grok_project_sessions.setdefault(grok_path, set()).update(session_ids)
-            for model, amount in usage.get("models", {}).items():
-                name = f"{nice_model(model)} (Grok Build)"
-                p["model_tok"][name] = p["model_tok"].get(name, 0) + int(amount or 0)
-    for grok_path, session_ids in grok_project_sessions.items():
-        proj_map[grok_path]["sessions"] += len({sid for sid in session_ids if sid})
+                                            "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add(hit["tool"])
+        p["tokens"] += hit["tokens"]
+        p["cost"] += hit["cost"]
+        if hit["cost_cny"]:
+            p["cost_cny"] = p.get("cost_cny", 0) + hit["cost_cny"]
+        if hit["day"] > p["last_active"]:
+            p["last_active"] = hit["day"]
+        for name, tokens in hit["models"].items():
+            p["model_tok"][name] = p["model_tok"].get(name, 0) + tokens
+        session = hit["session"]
+        if isinstance(session, tuple):
+            sessions.setdefault(proj_path, set()).update(session)
+        elif session:
+            sessions.setdefault(proj_path, set()).add(session)
+    for proj_path, session_ids in sessions.items():
+        proj_map[proj_path]["sessions"] += len(session_ids)
 
     # 检测本地 LISTEN 端口,匹配项目 cwd
     port_map = _detect_local_servers(set(proj_map.keys()))

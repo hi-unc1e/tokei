@@ -289,6 +289,46 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(models["openai/gpt-5.5"]["in"], 10)
         self.assertEqual(models["openai/gpt-5.5"]["cr"], 40)
 
+    def test_late_gpt6_model_fields_repair_cached_unknown_without_changing_tokens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-late-models.jsonl"
+            records = [self.session_meta("late-models")]
+            for index, variant in enumerate(("astra", "sol", "luna")):
+                records.append(json.dumps({
+                    "timestamp": f"2024-01-08T00:0{index * 2}:00Z",
+                    "type": "turn_context",
+                    "payload": {"permission_profile": {"description": "x" * 12_000,
+                                                        "model": "nested-decoy"},
+                                "model": f"gpt-6-{variant}"},
+                }))
+                records.append(self.token_count(
+                    f"2024-01-08T00:0{index * 2 + 1}:00Z",
+                    (100 * (index + 1), 80 * (index + 1), 10 * (index + 1), 4 * (index + 1)),
+                    (100, 80, 10, 4)))
+            path.write_text("\n".join(records) + "\n", encoding="utf-8")
+            cache = {"v": USAGE._SCAN_CACHE_VERSION}
+            original_reader = USAGE._iter_codex_usage_records
+
+            def old_reader(*args, **kwargs):
+                return original_reader(*args, model_limit=4096, **kwargs)
+
+            with mock.patch.object(USAGE, "CODEX_DIR", tmp), \
+                 mock.patch.object(USAGE, "CODEX_ARCHIVED_DIR", str(Path(tmp) / "archive")), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                with mock.patch.object(USAGE, "_CODEX_PARSER_VERSION", 7), \
+                     mock.patch.object(USAGE, "_iter_codex_usage_records", side_effect=old_reader):
+                    before = USAGE.scan_codex(self.bounds(), cache)["ranges"]["all"]
+                self.assertIn("unknown", before["models"])
+                after = USAGE.scan_codex(self.bounds(), cache)["ranges"]["all"]
+                warm = USAGE.scan_codex(self.bounds(), cache)["ranges"]["all"]
+
+        self.assertEqual(warm, after)
+        self.assertEqual(set(after["models"]), {f"openai/gpt-6-{v}" for v in ("astra", "sol", "luna")})
+        for field in ("in", "out", "cached", "reason"):
+            self.assertEqual(before.get(field), after.get(field))
+        for model in after["models"].values():
+            self.assertEqual((model["in"], model["cr"], model["out"], model["reason"]), (20, 80, 10, 4))
+
     def test_scan_ignores_runtime_quota_label_for_model_attribution(self):
         # rate_limits.limit_name 是额度/路由名，不是用户选的模型，
         # 不能凭空造出一个模型桶。来自 PR #51 的回归用例。
@@ -962,6 +1002,17 @@ class ScanCacheMigrationTests(unittest.TestCase):
 
 
 class CodexTokenLineReaderTests(unittest.TestCase):
+    def test_model_after_large_permission_profile_across_chunks(self):
+        context = json.dumps({"timestamp": "2026-09-23T01:00:00Z", "type": "turn_context",
+                              "payload": {"permission_profile": {"entries": "x" * 12_000,
+                                                                 "model": "nested-decoy"},
+                                          "model": "gpt-6-astra"}}).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            path.write_bytes(context + b"\n")
+            self.assertEqual(list(USAGE._iter_codex_usage_records(path, chunk_size=1024)),
+                             [("model", "gpt-6-astra")])
+
     def test_accepts_reordered_top_level_fields_and_ignores_nested_type_decoys(self):
         model = json.dumps({
             "payload": {"model": "gpt-5.5"},

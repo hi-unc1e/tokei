@@ -25,6 +25,7 @@ struct UsageToolVisibility: Equatable {
     var kimicode = true
     var musecode = true
     var cmdcode = true
+    var devin = true
 
     static let allVisible = UsageToolVisibility()
 }
@@ -341,6 +342,10 @@ enum UsageSummaryBuilder {
         if visibility.cmdcode {
             appendTokenTool(&lines, id: "cmdcode", name: "Command Code",
                             range: usage.cmdcode.ranges.get(range))
+        }
+        if visibility.devin {
+            appendTokenTool(&lines, id: "devin", name: "Devin",
+                            range: usage.devin.ranges.get(range))
         }
         return lines
     }

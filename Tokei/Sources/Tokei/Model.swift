@@ -943,6 +943,29 @@ struct GrokBotStat: Codable {
     }
 }
 
+/// Devin 的两个来源互不相干：`ranges` 来自 CLI 自己的会话库，
+/// `quota` 来自桌面端启动时写下的那一行套餐缓存。
+struct DevinStat: Codable {
+    var ranges: TokenUsageRanges
+    var quota: ProviderQuotaStat
+
+    static var empty: DevinStat {
+        DevinStat(ranges: .empty, quota: ProviderQuotaStat())
+    }
+
+    init(ranges: TokenUsageRanges, quota: ProviderQuotaStat) {
+        self.ranges = ranges
+        self.quota = quota
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ranges = (try? c.decodeIfPresent(TokenUsageRanges.self, forKey: .ranges)) ?? .empty
+        quota = (try? c.decodeIfPresent(ProviderQuotaStat.self, forKey: .quota))
+            ?? ProviderQuotaStat()
+    }
+}
+
 struct Usage: Codable {
     var claude: ClaudeStat
     var codex: CodexStat
@@ -968,6 +991,7 @@ struct Usage: Codable {
     var kimicode: KimiCodeStat
     var musecode: TokenUsageStat
     var cmdcode: TokenUsageStat
+    var devin: DevinStat
     var antigravity: ProviderQuotaStat
     var cursor: ProviderQuotaStat
     var zed: ProviderQuotaStat
@@ -980,7 +1004,7 @@ struct Usage: Codable {
         case openclaw, pi, workbuddy, workbuddyAI = "workbuddy_ai"
         case codebuddy
         case deepseekHarness = "deepseek_harness", opencode, qwencode
-        case qwenwork, kimicode, musecode, cmdcode, prime_agent, antigravity, cursor, zed, sub2api, zai
+        case qwenwork, kimicode, musecode, cmdcode, prime_agent, devin, antigravity, cursor, zed, sub2api, zai
     }
 
     init(from decoder: Decoder) throws {
@@ -1012,6 +1036,7 @@ struct Usage: Codable {
         kimicode = try c.decodeIfPresent(KimiCodeStat.self, forKey: .kimicode) ?? KimiCodeStat(ranges: .empty)
         musecode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .musecode) ?? TokenUsageStat(ranges: .empty)
         cmdcode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .cmdcode) ?? TokenUsageStat(ranges: .empty)
+        devin = (try? c.decodeIfPresent(DevinStat.self, forKey: .devin)) ?? .empty
         antigravity = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .antigravity) ?? ProviderQuotaStat()
         cursor = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .cursor) ?? ProviderQuotaStat()
         zed = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zed) ?? ProviderQuotaStat()

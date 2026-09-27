@@ -91,6 +91,22 @@ struct UsageSummaryBuilderCheck {
         try expect(UsageSummaryBuilder.formatUpdatedLine("加载中…") == nil,
                    "loading stamp omitted")
 
+        // Devin 卡片的复制按钮按 toolID "devin" 取这一行。
+        let devinLine = UsageSummaryBuilder.line(
+            forToolID: "devin", usage: usage, range: .today, visibility: allVisible
+        )
+        try expect(devinLine != nil, "devin line must resolve by toolID")
+        try expect(devinLine?.name == "Devin", "devin line name")
+        try expect(devinLine?.tokens == 59200, "devin line tokens")
+        try expect(devinLine?.sessions == 1, "devin line sessions")
+        try expect(todayText.contains("Devin"), "devin line missing: \(todayText)")
+
+        var hideDevin = allVisible
+        hideDevin.devin = false
+        try expect(!UsageSummaryBuilder.text(
+            usage: usage, range: .today, visibility: hideDevin, updated: nil
+        ).contains("Devin"), "hidden devin must be omitted")
+
         var hideGemini = allVisible
         hideGemini.gemini = false
         hideGemini.codebuddy = false
@@ -119,9 +135,9 @@ struct UsageSummaryBuilderCheck {
         let lines = UsageSummaryBuilder.toolLines(
             usage: usage, range: .today, visibility: hideGemini
         )
-        try expect(lines.map(\.name) == ["Claude Code", "Codex", "Luna Reserve"],
+        try expect(lines.map(\.name) == ["Claude Code", "Codex", "Luna Reserve", "Devin"],
                    "tool order/names: \(lines.map(\.name))")
-        try expect(lines.map(\.id) == ["claude", "codex", "codex_reserve"],
+        try expect(lines.map(\.id) == ["claude", "codex", "codex_reserve", "devin"],
                    "tool ids: \(lines.map(\.id))")
         try expect(lines[0].cost == 1.25, "claude cost value")
         try expect(lines[0].tokens == 1350, "claude tokens 1000+200+100+50")
@@ -142,10 +158,10 @@ struct UsageSummaryBuilderCheck {
                    "OpenClaw reasoning tokens must survive decode and summary aggregation")
 
         let totals = UsageSummaryBuilder.totals(for: lines)
-        try expect(totals.tools == 3, "totals tools")
+        try expect(totals.tools == 4, "totals tools")
         try expect(abs(totals.cost - 2.00) < 0.001, "totals cost")
-        try expect(totals.input == 1140, "totals input")
-        try expect(totals.output == 420, "totals output")
+        try expect(totals.input == 1140 + 17370, "totals input incl. Devin")
+        try expect(totals.output == 420 + 166, "totals output incl. Devin")
         try expect(hiddenText.contains("输入") || UsageSummaryBuilder.text(
             usage: usage, range: .today, visibility: hideGemini
         ).contains("输入"), "text totals include input detail")
@@ -302,6 +318,17 @@ struct UsageSummaryBuilderCheck {
           "month": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []},
           "year": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []}
         }
+      },
+      "devin": {
+        "ranges": {
+          "today": {"hit": 70.5, "in": 17370, "out": 166, "cr": 41664, "cw": 0, "reason": 0, "cost": 0, "sessions": 1, "models": []},
+          "yesterday": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "week": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "last_week": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "month": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "year": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []}
+        },
+        "quota": {"available": true, "plan": "Devin Free"}
       },
       "opencode": {
         "ranges": {
