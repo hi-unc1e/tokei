@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# TOKEI_COLLECTOR_REVISION=6
+# TOKEI_COLLECTOR_REVISION=7
 # <bitbar.title>AI Usage Bar</bitbar.title>
 # <bitbar.version>v0.1</bitbar.version>
 # <bitbar.author>local</bitbar.author>
@@ -3772,7 +3772,11 @@ def scan_codex(bounds, cache):
     if pending:
         pending.sort(reverse=True)      # 最近活跃的会话先补，排序用缓存里现成的时间戳
         for _, f, entry in pending[:_CODEX_PROJECT_BACKFILL_PER_SCAN]:
-            entry["proj"] = _codex_session_cwd(f) or ""
+            cwd, is_subagent = _codex_session_cwd_info(f)
+            entry["proj"] = cwd or ""
+            if is_subagent:
+                # guardian 等子代理会话计入成本，不计会话数
+                entry["proj_nosession"] = True
         cache["_dirty"] = True
 
     # A session can briefly exist in active and archived directories together.
@@ -15185,6 +15189,9 @@ def _project_contributions(cache):
             if not proj_path or proj_path == "?":
                 continue
             session = entry.get("sid") if session_mode == "sid" else entry_key
+            if entry.get("proj_nosession"):
+                # 子代理会话贡献成本与 token，但不计为一次独立会话
+                session = None
             for day_key, day in (entry.get("days") or {}).items():
                 if not isinstance(day, dict):
                     continue
@@ -15327,9 +15334,130 @@ def projects():
         }
         if path in port_map:
             entry["ports"] = sorted(port_map[path])
+        status = hq_status(path)
+        if status:
+            entry["status"] = status
         result.append(entry)
     result.sort(key=lambda x: x["last_active"], reverse=True)
     print(json.dumps(result, ensure_ascii=False))
+
+
+def _codex_session_cwd_info(path, max_lines=20, max_line_bytes=4 * 1024 * 1024):
+    """读取 Codex rollout 头部 session_meta，返回 (cwd, 是否子代理会话)。"""
+    try:
+        with open(path, "rb", buffering=0) as fh:
+            for _ in range(max_lines):
+                line = fh.readline(max_line_bytes)
+                if not line:
+                    break
+                if b'"session_meta"' not in line:
+                    continue
+                try:
+                    o = json.loads(line.decode("utf-8", errors="ignore"))
+                except Exception:
+                    continue
+                if o.get("type") != "session_meta":
+                    continue
+                meta = o.get("payload") or {}
+                source = meta.get("source")
+                is_subagent = isinstance(source, dict) and "subagent" in source
+                return meta.get("cwd") or "", is_subagent
+    except OSError:
+        pass
+    return "", False
+
+
+# ---- 项目状态协议（henry-hq）------------------------------------------------
+# 项目根目录的 STATUS.md（front matter 含 `hq: 1`）是给人看的现状摘要：
+#   ## ❓ 待判断 / ## ⛔ 阻塞 / ## ▶ 下一步 下的列表项；`- [x]` 或含 “→ Henry” 视为已答复。
+# .hq/verify.json 是机器检查结果，.hq/gate.log 是 Stop 闸门事件。只读，不改动任何文件。
+_HQ_SECTIONS = {"❓": "needs_you", "⛔": "blocked", "▶": "next"}
+_HQ_EMPTY = {"无", "暂无", "none", "(无)", "（无）", "-"}
+_HQ_VERIFY_START = "<!-- hq:verify:start -->"
+_HQ_VERIFY_END = "<!-- hq:verify:end -->"
+_HQ_ANNOTATION = re.compile(r"(?:→|->)\s*Henry\s*[:：]\s*(?![…\s`]|\.\.\.)\S")
+
+
+def _hq_parse_status(text):
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---", 4)
+    if end < 0:
+        return None
+    meta = {}
+    for line in text[4:end].splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            meta[k.strip()] = v.split(" #", 1)[0].strip().strip('"').strip("'")
+    if not meta.get("hq"):
+        return None
+    body = text[end + 4:]
+    s, e = body.find(_HQ_VERIFY_START), body.find(_HQ_VERIFY_END)
+    if s >= 0 and e > s:
+        body = body[:s] + body[e + len(_HQ_VERIFY_END):]
+    summary, current = "", None
+    items = {k: [] for k in _HQ_SECTIONS.values()}
+    answered = 0
+    for line in body.splitlines():
+        st = line.strip()
+        if st.startswith("## "):
+            title = st[3:].strip()
+            current = next((v for k, v in _HQ_SECTIONS.items() if title.startswith(k)), None)
+            continue
+        if st.startswith("# "):
+            current = None
+            continue
+        if not summary and st.startswith(">"):
+            summary = re.sub(r"\*\*(.+?)\*\*", r"\1", st.lstrip(">").strip())
+            continue
+        m = re.match(r"^\s{0,3}[-*]\s+(?:\[([ xX])\]\s+)?(.+?)\s*$", line)
+        if current is None or not m or m.group(2).strip().lower() in _HQ_EMPTY:
+            continue
+        text_item = re.sub(r"\*\*(.+?)\*\*", r"\1", m.group(2).strip())
+        if current == "needs_you" and ((m.group(1) or " ").lower() == "x" or _HQ_ANNOTATION.search(text_item)):
+            answered += 1
+            continue
+        items[current].append(text_item.split(" — ", 1)[0][:120])
+    return {
+        "state": meta.get("state", "active"), "theme": meta.get("theme", ""),
+        "value": meta.get("value", ""), "updated": meta.get("updated", ""),
+        "summary": summary, "needs_you": items["needs_you"], "blocked": items["blocked"],
+        "next": items["next"], "answered": answered,
+    }
+
+
+def hq_status(project_path):
+    """读取项目的 henry-hq 状态；未接入协议的项目返回 None。"""
+    try:
+        with open(os.path.join(project_path, "STATUS.md"), encoding="utf-8") as fh:
+            status = _hq_parse_status(fh.read())
+    except (OSError, UnicodeDecodeError):
+        return None
+    if status is None:
+        return None
+    checks = {}
+    try:
+        with open(os.path.join(project_path, ".hq", "verify.json"), encoding="utf-8") as fh:
+            checks = (json.load(fh) or {}).get("checks") or {}
+    except (OSError, ValueError):
+        pass
+    status["verify_total"] = len(checks)
+    status["verify_passed"] = sum(1 for c in checks.values() if c.get("ok"))
+    # exit 3 = 条件不满足未运行（如额度用尽），既不算通过也不算失败
+    status["verify_failed"] = sorted(k for k, c in checks.items() if not c.get("ok") and not c.get("not_run"))
+    status["verify_at"] = max((c.get("at", "") for c in checks.values()), default="")
+    gave_up = 0
+    cutoff = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
+    try:
+        with open(os.path.join(project_path, ".hq", "gate.log"), encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 2 and parts[0] >= cutoff and parts[1] == "gave-up":
+                    gave_up += 1
+    except OSError:
+        pass
+    status["gate_gave_up_24h"] = gave_up
+    return status
 
 
 def _detect_local_servers(project_paths):

@@ -83,8 +83,10 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - 随时切换，对比不同时段用量趋势
 
 ### 项目追踪
-- 按项目维度查看 Claude Code / Pi / WorkBuddy / WorkBuddy Intl. / CodeBuddy / Grok Build 用量
+- 按项目维度查看 Claude Code / Codex / Pi / WorkBuddy / WorkBuddy Intl. / CodeBuddy / Grok Build 用量（Codex 的自动审批子会话计入成本、不计会话数）
 - 了解每个项目消耗了多少 Token 和成本
+- **项目状态**：项目根目录的 `STATUS.md`（front matter 含 `hq: 1`）会被读取并显示为 ❓待判断 / ⛔阻塞 / 机器验收计数与一句话现状；
+  有待判断、阻塞或验收失败的项目归入顶部「待我判断」分组。机器验收结果读自 `.hq/verify.json`。只读，不改动项目文件。
 
 ### 多设备同步
 - 基于 Git 的跨设备同步（Mac + Linux 服务器）

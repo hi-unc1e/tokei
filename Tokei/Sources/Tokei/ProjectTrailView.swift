@@ -2,6 +2,29 @@ import SwiftUI
 import AppKit
 import TokeiUpdateSecurity
 
+/// henry-hq 项目状态协议：项目根 STATUS.md + .hq/verify.json（由 usage.30s.py --projects 读取）。
+struct TrailStatus: Codable {
+    var state: String
+    var theme: String
+    var value: String
+    var updated: String
+    var summary: String
+    var needs_you: [String]
+    var blocked: [String]
+    var next: [String]
+    var answered: Int
+    var verify_total: Int
+    var verify_passed: Int
+    var verify_failed: [String]
+    var verify_at: String
+    var gate_gave_up_24h: Int
+
+    /// 需要 Henry 看一眼：有待判断/阻塞，或机器验收失败，或闸门放弃过。
+    var needsAttention: Bool {
+        !needs_you.isEmpty || !blocked.isEmpty || !verify_failed.isEmpty || gate_gave_up_24h > 0
+    }
+}
+
 struct TrailProject: Codable, Identifiable {
     var path: String
     var name: String
@@ -13,6 +36,7 @@ struct TrailProject: Codable, Identifiable {
     var top_model: String
     var tools: [String]
     var ports: [Int]?
+    var status: TrailStatus? = nil
     var id: String { path }
 }
 
@@ -46,9 +70,10 @@ struct ProjectTrailView: View {
         }
     }
 
-    private enum Group: String, CaseIterable { case pinned, today, week, earlier, dormant }
+    private enum Group: String, CaseIterable { case attention, pinned, today, week, earlier, dormant }
 
     private func group(for p: TrailProject) -> Group {
+        if p.status?.needsAttention == true { return .attention }
         if pinned.contains(p.path) { return .pinned }
         let cal = Calendar.current
         let today = cal.startOfDay(for: Date())
@@ -62,6 +87,7 @@ struct ProjectTrailView: View {
 
     private func groupLabel(_ g: Group) -> String {
         switch g {
+        case .attention: return "待我判断"
         case .pinned: return "置顶"
         case .today: return "今天"
         case .week: return "本周"
@@ -85,6 +111,7 @@ struct ProjectTrailView: View {
                 .buttonStyle(.plain)
                 .tip("刷新")
             }
+            attentionSummary
             if loading || cached == nil {
                 HStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
                     .frame(height: 120)
@@ -134,6 +161,9 @@ struct ProjectTrailView: View {
             if dormant {
                 Text("💤").font(.system(size: Theme.fontSize(10)))
             }
+            if title == "待我判断" {
+                Text("🧑‍⚖️").font(.system(size: Theme.fontSize(10)))
+            }
             Text(title)
                 .font(.system(size: Theme.fontSize(11), weight: .semibold))
                 .foregroundStyle(dormant ? Theme.tTertiary : Theme.tSecondary)
@@ -161,6 +191,9 @@ struct ProjectTrailView: View {
                     .foregroundStyle(Theme.tTertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                if let s = p.status {
+                    statusBlock(s)
+                }
                 HStack(spacing: 6) {
                     Text(Fmt.relativeDate(p.last_active))
                         .font(.system(size: Theme.fontSize(9))).foregroundStyle(Theme.tTertiary)
@@ -237,6 +270,80 @@ struct ProjectTrailView: View {
                 NSPasteboard.general.setString(p.path, forType: .string)
             }
         }
+    }
+
+    // MARK: - henry-hq 状态
+
+    @ViewBuilder
+    var attentionSummary: some View {
+        let tracked = projects.compactMap(\.status)
+        let needs = tracked.reduce(0) { $0 + $1.needs_you.count }
+        let blocked = tracked.reduce(0) { $0 + $1.blocked.count }
+        let failing = tracked.filter { !$0.verify_failed.isEmpty }.count
+        if !tracked.isEmpty {
+            HStack(spacing: 6) {
+                statusChip("❓ \(needs) 待判断", needs > 0 ? Theme.qoder : Theme.tTertiary)
+                statusChip("⛔ \(blocked) 阻塞", blocked > 0 ? Theme.zed : Theme.tTertiary)
+                statusChip(failing > 0 ? "✗ \(failing) 验收失败" : "✓ 验收无失败",
+                           failing > 0 ? Theme.zed : Theme.hermes)
+                Spacer(minLength: 0)
+            }
+            .help("来自已接入 henry-hq 的 \(tracked.count) 个项目（STATUS.md / .hq/verify.json）")
+        }
+    }
+
+    func statusBlock(_ s: TrailStatus) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                if !s.theme.isEmpty {
+                    statusChip(s.value.isEmpty ? s.theme : "\(s.theme) · \(s.value)", Theme.tSecondary)
+                }
+                if s.state != "active" {
+                    statusChip(s.state == "parked" ? "搁置" : s.state, Theme.tTertiary)
+                }
+                if !s.needs_you.isEmpty { statusChip("❓\(s.needs_you.count)", Theme.qoder) }
+                if !s.blocked.isEmpty { statusChip("⛔\(s.blocked.count)", Theme.zed) }
+                if s.verify_total > 0 {
+                    let ok = s.verify_failed.isEmpty
+                    statusChip("\(ok ? "✓" : "✗") \(s.verify_passed)/\(s.verify_total)", ok ? Theme.hermes : Theme.zed)
+                        .help(ok ? "机器验收全部通过 · \(s.verify_at)" : "未通过：\(s.verify_failed.joined(separator: ", "))")
+                }
+                if s.answered > 0 { statusChip("已答复 \(s.answered)", Theme.tTertiary) }
+                if s.gate_gave_up_24h > 0 {
+                    statusChip("闸门放弃 \(s.gate_gave_up_24h)", Theme.zed)
+                        .help("近 24 小时 agent 两次没能通过验收闸门，被迫放行")
+                }
+            }
+            if !s.summary.isEmpty {
+                Text(s.summary)
+                    .font(.system(size: Theme.fontSize(10)))
+                    .foregroundStyle(Theme.tSecondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(Array((s.blocked.map { "⛔ " + $0 } + s.needs_you.map { "❓ " + $0 }).prefix(3).enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.system(size: Theme.fontSize(9.5)))
+                    .foregroundStyle(Theme.tTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    func statusChip(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.system(size: Theme.fontSize(9), weight: .semibold))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Capsule().fill(color.opacity(0.14)))
+    }
+
+    func openFile(_ dir: String, _ name: String) {
+        NSWorkspace.shared.open(URL(fileURLWithPath: dir).appendingPathComponent(name))
     }
 
     var footer: some View {
