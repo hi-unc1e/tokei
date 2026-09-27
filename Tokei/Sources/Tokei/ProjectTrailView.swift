@@ -217,8 +217,14 @@ struct ProjectTrailView: View {
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
             .fill(Color.primary.opacity(0.04)))
         .contentShape(Rectangle())
-        .onTapGesture { openInTerminal(p.path) }
+        .onTapGesture { openInITerm(p.path) }
         .contextMenu {
+            if p.status != nil {
+                Button("打开 STATUS.md") { openFile(p.path, "STATUS.md") }
+                Button("打开 ACCEPTANCE.md") { openFile(p.path, "ACCEPTANCE.md") }
+                Button("打开 DECISIONS.md") { openFile(p.path, "DECISIONS.md") }
+                Divider()
+            }
             Button("在终端打开") { openInTerminal(p.path) }
             Button("在 Ghostty 打开") { openInGhostty(p.path) }
             Button("在 iTerm 打开") { openInITerm(p.path) }
