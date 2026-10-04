@@ -29,6 +29,40 @@ final class DataLoader {
     private static let lastUsageURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".tokei/last_usage.json")
 
+    // 采集失败原本只写 GUI 进程的 stderr——那是个黑洞。2026-10 那次采集管道
+    // 停摆三天就是因为在用户侧找不到任何现场。落一份滚动日志到 ~/.tokei。
+    private static let scriptLogURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".tokei/script_error.log")
+    private static let scriptLogLock = NSLock()
+    private static let scriptLogLimit = 256 * 1024
+
+    static func logScriptFailure(_ message: String) {
+        scriptLogLock.lock()
+        defer { scriptLogLock.unlock() }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let line = "[\(formatter.string(from: Date()))] \(message)\n"
+        let url = scriptLogURL
+        if let existing = try? Data(contentsOf: url), existing.count > scriptLogLimit {
+            try? existing.suffix(scriptLogLimit / 2).write(to: url, options: .atomic)
+        }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+        } else {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(line.utf8).write(to: url, options: .atomic)
+        }
+    }
+
+    static func trimmedStderr(_ stderr: String, limit: Int = 2000) -> String {
+        let cleaned = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count > limit else { return cleaned }
+        return String(cleaned.suffix(limit))
+    }
+
     private static func syncToUserDir(from resourceDir: String) {
         let dest = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".tokei")
         CollectorScriptInstaller.sync(
@@ -213,6 +247,10 @@ final class DataLoader {
         claudeQuotaScanLock.lock()
         defer { claudeQuotaScanLock.unlock() }
         let nowEpoch = Int(now.timeIntervalSince1970)
+        // 全量扫描要挨个探测缓存文件（含 zstd 解压）。Claude 桌面版的缓存目录
+        // 能涨到两万多个文件，不设上限的话一次扫描可以吃掉几分钟，把整条刷新
+        // 管道堵死。到点就收手，没找到就等下一轮再试。
+        let scanDeadline = now.addingTimeInterval(20)
         let records = claudeCacheRecords()
         var recordsByPath: [String: ClaudeCacheRecord] = [:]
         for record in records { recordsByPath[record.url.path] = record }
@@ -238,6 +276,7 @@ final class DataLoader {
                 selected = value
                 break
             }
+            if Date() > scanDeadline { break }
         }
 
         var candidateInvalid = false
@@ -264,7 +303,8 @@ final class DataLoader {
             inspected: &inspected,
             candidateInvalid: candidateInvalid,
             initialScan: initialScan,
-            nowEpoch: nowEpoch
+            nowEpoch: nowEpoch,
+            scanDeadline: scanDeadline
         )
         guard claudeCLIQuotaEnabled,
               !hasFreshClaudeCoreQuota(desktopQuota),
@@ -291,13 +331,15 @@ final class DataLoader {
         inspected: inout Set<String>,
         candidateInvalid: Bool,
         initialScan: Bool,
-        nowEpoch: Int
+        nowEpoch: Int,
+        scanDeadline: Date
     ) -> [String: Any]? {
         if initialScan { state.lastFullScan = nowEpoch }
         let retryInterval = state.snapshot == nil
             ? claudeQuotaRetryScanInterval
             : claudeQuotaFullScanInterval
         let needsFullScan = candidateInvalid || nowEpoch - state.lastFullScan >= retryInterval
+        var scanDeadlineHit = false
         if selected == nil && needsFullScan {
             for record in records where !inspected.contains(record.url.path) {
                 inspected.insert(record.url.path)
@@ -305,8 +347,14 @@ final class DataLoader {
                     selected = (record, snapshot)
                     break
                 }
+                if Date() > scanDeadline {
+                    scanDeadlineHit = true
+                    break
+                }
             }
-            state.lastFullScan = nowEpoch
+            // 到点没收手就别推进 lastFullScan：snapshot 为 nil 时下一轮仍按
+            // 5 分钟的重试间隔来，而不是把没扫完的目录封存 6 小时。
+            if !scanDeadlineHit { state.lastFullScan = nowEpoch }
         }
 
         if let (record, snapshot) = selected {
@@ -527,6 +575,9 @@ final class DataLoader {
         let result = runScriptRaw(args: args, timeout: 600)
         guard !result.timedOut, result.exitCode == 0 else {
             fputs("Tokei script failed: exit=\(result.exitCode) timeout=\(result.timedOut)\n\(result.stderr)\n", stderr)
+            logScriptFailure(
+                "script \(args.joined(separator: " ")) failed: exit=\(result.exitCode) timeout=\(result.timedOut) stderr=\(trimmedStderr(result.stderr))"
+            )
             return nil
         }
         let data = Data(result.stdout.utf8)
@@ -565,6 +616,7 @@ final class DataLoader {
             return usage
         } catch {
             fputs("Tokei decode error: \(error)\n", stderr)
+            logScriptFailure("decode failed for \(args.joined(separator: " ")): \(error)")
             return nil
         }
     }
@@ -629,6 +681,9 @@ final class DataLoader {
             let ok = !result.timedOut && result.exitCode == 0
             if !ok {
                 fputs("Tokei sync snapshot failed: exit=\(result.exitCode) timeout=\(result.timedOut)\n\(result.stderr)\n", stderr)
+                logScriptFailure(
+                    "sync snapshot failed: exit=\(result.exitCode) timeout=\(result.timedOut) stderr=\(trimmedStderr(result.stderr))"
+                )
             }
             DispatchQueue.main.async { completion(ok) }
         }
@@ -716,6 +771,7 @@ final class DataLoader {
         do {
             try proc.run()
         } catch {
+            logScriptFailure("spawn \(scriptPath) \(args.joined(separator: " ")) failed: \(error.localizedDescription)")
             return ScriptResult(stdout: "", stderr: error.localizedDescription, exitCode: -1,
                                 elapsed: Date().timeIntervalSince(started), timedOut: false)
         }

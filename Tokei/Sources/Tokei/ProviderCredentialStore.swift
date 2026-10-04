@@ -105,6 +105,7 @@ enum ProviderCredentialStore {
 
     @discardableResult
     static func setToken(_ token: String, for provider: ProviderSecret) -> Bool {
+        invalidateOverridesCache()
         let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.isEmpty {
             let currentStatus = writeTokenData(
@@ -138,19 +139,80 @@ enum ProviderCredentialStore {
         return SecItemAdd(item as CFDictionary, nil)
     }
 
+    // 每次刷新都要构建一次环境变量,而 Keychain 查询走的是可能「无限期阻塞」
+    // 的 legacy 路径(见上方 service 注释)——2026-10 实测:钥匙串锁定状态下,
+    // SecItemCopyMatching 读取凭据会永远挂起,刷新管道在 proc.run() 之前就被
+    // 堵死,600s 超时 killer 根本没机会布防,整个 App 因此停摆三天。所以:
+    // 1) 查询放到独立串行队列,等待有硬超时,超时就不带凭据继续刷新;
+    // 2) 卡住的查询只允许存在一个,期间后续调用直接返回空;
+    // 3) 60s TTL 缓存把健康路径的查询降到偶发。
+    private static let overridesCacheLock = NSLock()
+    private static var overridesCache: (value: [String: String], at: Date)?
+    private static let overridesCacheTTL: TimeInterval = 60
+    private static let overridesLookupQueue = DispatchQueue(
+        label: "com.tokei.app.provider-overrides", qos: .utility)
+    private static let overridesLookupGate = NSLock()
+    private static var overridesLookupInFlight = false
+    private static let overridesLookupTimeout: TimeInterval = 5
+
+    private static func cachedOverrides() -> [String: String]? {
+        overridesCacheLock.lock()
+        defer { overridesCacheLock.unlock() }
+        guard let cache = overridesCache,
+              Date().timeIntervalSince(cache.at) < overridesCacheTTL else { return nil }
+        return cache.value
+    }
+
+    private static func storeOverridesCache(_ value: [String: String]) {
+        overridesCacheLock.lock()
+        overridesCache = (value, Date())
+        overridesCacheLock.unlock()
+    }
+
+    private static func invalidateOverridesCache() {
+        overridesCacheLock.lock()
+        overridesCache = nil
+        overridesCacheLock.unlock()
+    }
+
     static func environmentOverrides() -> [String: String] {
-        var result: [String: String] = [:]
-        if let token = token(for: .sub2api) {
-            result["SUB2API_API_KEY"] = token
+        if let cached = cachedOverrides() { return cached }
+        overridesLookupGate.lock()
+        let alreadyStuck = overridesLookupInFlight
+        overridesLookupInFlight = true
+        overridesLookupGate.unlock()
+        if alreadyStuck {
+            // 上一轮查询还卡在 Keychain 里:这次不带凭据继续,别跟着堵死。
+            return [:]
         }
-        if let token = token(for: .zai) {
-            result["Z_AI_API_KEY"] = token
+        let semaphore = DispatchSemaphore(value: 0)
+        overridesLookupQueue.async {
+            defer {
+                overridesLookupGate.lock()
+                overridesLookupInFlight = false
+                overridesLookupGate.unlock()
+            }
+            var result: [String: String] = [:]
+            if let token = token(for: .sub2api) {
+                result["SUB2API_API_KEY"] = token
+            }
+            if let token = token(for: .zai) {
+                result["Z_AI_API_KEY"] = token
+            }
+            if providerQuotaEnabled("zed"), let credentials = zedCredentials() {
+                result["TOKEI_ZED_USER_ID"] = credentials.userID
+                result["TOKEI_ZED_ACCESS_TOKEN"] = credentials.accessToken
+            }
+            storeOverridesCache(result)
+            semaphore.signal()
         }
-        if providerQuotaEnabled("zed"), let credentials = zedCredentials() {
-            result["TOKEI_ZED_USER_ID"] = credentials.userID
-            result["TOKEI_ZED_ACCESS_TOKEN"] = credentials.accessToken
+        let waited = semaphore.wait(timeout: .now() + overridesLookupTimeout)
+        if waited != .success {
+            DataLoader.logScriptFailure(
+                "provider keychain lookup exceeded \(Int(overridesLookupTimeout))s — continuing without credential overrides (provider quotas will go stale until the keychain responds)"
+            )
         }
-        return result
+        return cachedOverrides() ?? [:]
     }
 
     private static func baseQuery(

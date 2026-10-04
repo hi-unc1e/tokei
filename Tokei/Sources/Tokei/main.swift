@@ -38,6 +38,12 @@ final class Store: ObservableObject {
     private var refreshPending = false
     private var dashboardPrewarmStarted = false
     private var quotaDetailPrewarmPending = false
+    /// 刷新代次。看门狗强制换代后，旧一轮的完成回调不得再碰 refreshInFlight。
+    private var refreshCycle = 0
+    private var refreshWatchdog: DispatchSourceTimer?
+    /// 看门狗判定刷新循环停摆的阈值。合法的刷新最长可达「前置扫描 30s +
+    /// 脚本 600s 超时」，所以阈值必须盖过它；代价是真停摆时要等这么久才被拉起。
+    static let refreshWatchdogTimeout: TimeInterval = 660
     /// 上一次刷新开跑的时刻。调度按它算间隔，所以「面板打开顺手刷的那次」
     /// 也算数，不会开完面板立刻又被定时器刷一遍。
     private(set) var lastRefreshStartedAt = Date.distantPast
@@ -86,8 +92,12 @@ final class Store: ObservableObject {
 
     private func performRefresh() {
         lastRefreshStartedAt = Date()
+        refreshCycle += 1
+        let cycle = refreshCycle
         DataLoader.load { [weak self] u in
             guard let self = self else { return }
+            // 看门狗换代后旧回调直接作废，防止它把新一轮的 in-flight 状态清掉。
+            guard cycle == self.refreshCycle else { return }
             guard let local = u else {
                 let hadPendingRefresh = self.refreshPending
                 let willRetry = self.usage == nil && self.retryCount < 3
@@ -106,7 +116,7 @@ final class Store: ObservableObject {
                 }
                 (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
                 if !willRetry { self.prewarmQuotaDetailIfReady() }
-                self.finishRefresh()
+                self.finishRefresh(cycle)
                 return
             }
             self.retryCount = 0
@@ -141,7 +151,7 @@ final class Store: ObservableObject {
                 DashboardRepository.shared.load(.all, force: true)
             }
             self.prewarmQuotaDetailIfReady()
-            self.finishRefresh()
+            self.finishRefresh(cycle)
         }
     }
 
@@ -151,13 +161,41 @@ final class Store: ObservableObject {
         QuotaDetailRepository.shared.load(force: true)
     }
 
-    private func finishRefresh() {
+    private func finishRefresh(_ cycle: Int) {
+        guard cycle == refreshCycle else { return }
         if refreshPending {
             refreshPending = false
             performRefresh()
         } else {
             refreshInFlight = false
         }
+    }
+
+    /// 刷新循环的自愈看门狗。挂在全局队列的 DispatchSourceTimer 上，不依赖
+    /// 主线程 runloop、也不依赖刷新闭包自己走完——2026-10 观察到一次循环
+    /// 整体停摆（进程活着、线程全闲、几十分钟没有任何刷新发起），唯一可靠
+    /// 的恢复手段就是这样一个旁观者定时器。
+    func startRefreshWatchdog() {
+        guard refreshWatchdog == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + Self.refreshWatchdogTimeout, repeating: 60)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let since = Date().timeIntervalSince(self.lastRefreshStartedAt)
+            guard since > Self.refreshWatchdogTimeout else { return }
+            DispatchQueue.main.async {
+                guard Date().timeIntervalSince(self.lastRefreshStartedAt) > Self.refreshWatchdogTimeout
+                else { return }
+                DataLoader.logScriptFailure(
+                    "refresh loop stalled for \(Int(Date().timeIntervalSince(self.lastRefreshStartedAt)))s — forcing recovery"
+                )
+                self.refreshInFlight = false
+                self.refreshPending = false
+                self.refresh()
+            }
+        }
+        timer.resume()
+        refreshWatchdog = timer
     }
 
     private func recordQuotaHistory(_ usage: Usage) {
@@ -314,6 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         store.primeCachedUsage()
         store.refresh()
+        store.startRefreshWatchdog()
         store.sitReminder.updateRunning()
         Updater.shared.checkForUpdate()
         autoFetchPricing()

@@ -44,6 +44,7 @@ struct ProjectTrailView: View {
     @Binding var cached: [TrailProject]?
     @State private var loading = false
     @State private var query = ""
+    @State private var lastFailedAt: Date?
     @AppStorage("pinnedProjects") private var pinnedRaw = ""
 
     private var projects: [TrailProject] { cached ?? [] }
@@ -131,7 +132,9 @@ struct ProjectTrailView: View {
                 footer
             }
         }
-        .onAppear { if cached == nil { loadData() } }
+        .onAppear {
+            if cached == nil || cached?.isEmpty == true { loadData() }
+        }
     }
 
     var searchBar: some View {
@@ -444,12 +447,25 @@ struct ProjectTrailView: View {
     }
 
     func loadData() {
+        guard !loading else { return }
         loading = true
         DispatchQueue.global(qos: .utility).async {
             let data = DashboardView.runScript(["--projects"])
-            let list = (try? JSONDecoder().decode([TrailProject].self, from: data)) ?? []
+            // 解析失败(超时/空输出)时保留旧值并稍后自动重试。之前失败会把
+            // 空数组写进 cached,而 onAppear 只在 cached == nil 时重载,一次
+            // 失败就让面板永远空着——2026-10 面板「无匹配项目」卡死就是这么来的。
+            let list = try? JSONDecoder().decode([TrailProject].self, from: data)
             DispatchQueue.main.async {
-                cached = list
+                if let list {
+                    cached = list
+                    lastFailedAt = nil
+                } else {
+                    lastFailedAt = Date()
+                    DataLoader.logScriptFailure("--projects returned no decodable payload")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 90) {
+                        if !loading, cached == nil || cached?.isEmpty == true { loadData() }
+                    }
+                }
                 loading = false
             }
         }

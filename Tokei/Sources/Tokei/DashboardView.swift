@@ -278,6 +278,9 @@ final class DashboardRepository: ObservableObject {
                     self.payloads[key] = payload
                 } else {
                     fputs("Tokei dashboard failed: exit=\(result.exitCode) timeout=\(result.timedOut)\n", stderr)
+                    DataLoader.logScriptFailure(
+                        "dashboard --period \(key) failed: exit=\(result.exitCode) timeout=\(result.timedOut) stderr=\(DataLoader.trimmedStderr(result.stderr))"
+                    )
                 }
                 if shouldReload { self.load(period, force: true) }
             }
