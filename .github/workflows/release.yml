@@ -91,10 +91,12 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           SHA256: ${{ env.SHA256 }}
         run: |
-          # workflow_dispatch 时若标签不存在则先补打，保证 Release 始终挂在 v* 标签上
+          # workflow_dispatch 时若标签不存在则先补打，保证 Release 始终挂在 v* 标签上。
+          # checkout 默认不拉 tags，先取一次再判断，避免误判后推送被远端已有 tag 拒绝。
+          git fetch --tags -q origin || true
           if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
             git tag "$TAG"
-            git push origin "$TAG"
+            git push origin "$TAG" || git fetch --tags -q origin || true
           fi
 
           NOTES="Tokei $TAG（本 fork 在 GitHub Actions 上构建）
