@@ -158,12 +158,58 @@ def _python_string_template(token):
     return "".join(out)
 
 
+def _string_tokens(source):
+    """tokenize 结果；Python 3.12+ 的 f-string 碎片合回单个 STRING token。
+
+    PEP 701 把 f"…{x}…" 拆成 FSTRING_START/MIDDLE/END，3.11 及更老是完整的
+    STRING。key 提取在两种分词下必须一致，否则 3.12+ 会误判词条。做法是按
+    位置把整段 f-string 的源码原文切成一个 STRING token——内容一字不差，
+    下游的模板转换与 COLLECTOR_IGNORE（按 {F} 这类字段内容匹配）都不用改。"""
+    raw = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    fstring_start = getattr(tokenize, "FSTRING_START", None)
+    if fstring_start is None:
+        return raw
+    line_starts = [0]
+    for line in source.splitlines(keepends=True):
+        line_starts.append(line_starts[-1] + len(line))
+
+    def offset(pos):
+        return line_starts[pos[0] - 1] + pos[1]
+
+    out, i = [], 0
+    while i < len(raw):
+        tok = raw[i]
+        if tok.type != fstring_start:
+            out.append(tok)
+            i += 1
+            continue
+        # 找配对的 END：字段里还能嵌套 f-string，按 START 计数配对
+        j, nesting = i + 1, 1
+        while j < len(raw):
+            if raw[j].type == fstring_start:
+                nesting += 1
+            elif raw[j].type == tokenize.FSTRING_END:
+                nesting -= 1
+                if nesting == 0:
+                    break
+            j += 1
+        if j >= len(raw):
+            out.append(tok)   # 未闭合的残片，原样保留
+            i += 1
+            continue
+        merged = source[offset(tok.start):offset(raw[j].end)]
+        out.append(tokenize.TokenInfo(tokenize.STRING, merged,
+                                      tok.start, raw[j].end, tok.line))
+        i = j + 1
+    return out
+
+
 def collector_keys():
     """采集器输出、会进 App 界面的中文。"""
     source = (ROOT / "usage.30s.py").read_text(encoding="utf-8")
     keys = {}
     previous = None
-    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+    for token in _string_tokens(source):
         if token.type == tokenize.STRING and CJK.search(token.string):
             docstring = previous is None or previous.type in (
                 tokenize.INDENT, tokenize.DEDENT, tokenize.NEWLINE, tokenize.NL)
