@@ -245,9 +245,10 @@ struct QuotaHistoryProjection {
                 previous[window] = (remaining, point.timestamp)
             }
         }
-        return days.flatMap { window, byDay in
+        // 拆成具名子表达式：单链 flatMap+sorted 的嵌套闭包会让类型检查超时
+        let rows: [QuotaDailyConsumption] = days.flatMap { (window: String, byDay: [Date: Day]) in
             let oldest = byDay.keys.min()
-            return byDay.map { start, day in
+            return byDay.map { (start: Date, day: Day) -> QuotaDailyConsumption in
                 let missingHistory = start == oldest
                     && TimeInterval(day.first) - start.timeIntervalSince1970 > edgeTolerance
                 return QuotaDailyConsumption(
@@ -258,11 +259,13 @@ struct QuotaHistoryProjection {
                     isComplete: !day.uncertain && !missingHistory
                 )
             }
-        }.sorted {
-            $0.dayStart == $1.dayStart
-                ? (tool.windowNames.firstIndex(of: $0.window) ?? 0)
-                    < (tool.windowNames.firstIndex(of: $1.window) ?? 0)
-                : $0.dayStart > $1.dayStart
+        }
+        let windowOrder: (String) -> Int = { name in tool.windowNames.firstIndex(of: name) ?? 0 }
+        return rows.sorted { lhs, rhs in
+            if lhs.dayStart != rhs.dayStart {
+                return lhs.dayStart > rhs.dayStart
+            }
+            return windowOrder(lhs.window) < windowOrder(rhs.window)
         }
     }
 

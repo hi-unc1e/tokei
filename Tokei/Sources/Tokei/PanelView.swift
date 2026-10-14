@@ -3408,9 +3408,9 @@ struct PanelView: View {
     }
 
     var settingsPrivacySection: some View {
-        settingsSection("lock.shield", "隐私与额度") {
-            settingsToggleRow("Claude Code CLI 额度查询", isOn: $claudeCLIQuotaEnabled)
-            Text("默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。")
+        settingsSection("lock.shield", L("隐私与额度")) {
+            settingsToggleRow(L("Claude Code CLI 额度查询"), isOn: $claudeCLIQuotaEnabled)
+            Text(L("默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。"))
                 .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)

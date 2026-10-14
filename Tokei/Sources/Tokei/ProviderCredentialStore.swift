@@ -209,11 +209,33 @@ enum ProviderCredentialStore {
         }
         let waited = semaphore.wait(timeout: .now() + overridesLookupTimeout)
         if waited != .success {
-            DataLoader.logScriptFailure(
+            logKeychainStall(
                 "provider keychain lookup exceeded \(Int(overridesLookupTimeout))s — continuing without credential overrides (provider quotas will go stale until the keychain responds)"
             )
         }
         return cachedOverrides() ?? [:]
+    }
+
+    /// 与 DataLoader.logScriptFailure 同一文件、同一滚动上限，但保持本模块零依赖——
+    /// 测试（test_provider_credentials）单独编译本文件，不允许引用其他源文件。
+    private static func logKeychainStall(_ message: String) {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".tokei/script_error.log")
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let line = "[\(formatter.string(from: Date()))] \(message)\n"
+        if let existing = try? Data(contentsOf: url), existing.count > 256 * 1024 {
+            try? existing.suffix(128 * 1024).write(to: url, options: .atomic)
+        }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+        } else {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(line.utf8).write(to: url, options: .atomic)
+        }
     }
 
     private static func baseQuery(

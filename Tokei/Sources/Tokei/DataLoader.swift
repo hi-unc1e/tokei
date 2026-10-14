@@ -276,11 +276,13 @@ final class DataLoader {
 
     private static func scanClaudeQuotaNow(now: Date) -> [String: Any]? {
         let nowEpoch = Int(now.timeIntervalSince1970)
+        // 上游行为：时钟偏斜相同的未来时间戳文件不可信，超出容差的一律忽略。
+        let horizon = now.timeIntervalSince1970 + claudeQuotaFutureSkew
         // 全量扫描要挨个探测缓存文件（含 zstd 解压）。Claude 桌面版的缓存目录
         // 能涨到两万多个文件，不设上限的话一次扫描可以吃掉几分钟，把整条刷新
         // 管道堵死。到点就收手，没找到就等下一轮再试。
         let scanDeadline = now.addingTimeInterval(20)
-        let records = claudeCacheRecords()
+        let records = claudeCacheRecords().filter { $0.modified <= horizon }
         var recordsByPath: [String: ClaudeCacheRecord] = [:]
         for record in records { recordsByPath[record.path] = record }
         let original = loadClaudeQuotaState()

@@ -88,12 +88,12 @@ struct ProjectTrailView: View {
 
     private func groupLabel(_ g: Group) -> String {
         switch g {
-        case .attention: return "待我判断"
-        case .pinned: return "置顶"
-        case .today: return "今天"
-        case .week: return "本周"
-        case .earlier: return "更早"
-        case .dormant: return "沉睡"
+        case .attention: return L("待我判断")
+        case .pinned: return L("置顶")
+        case .today: return L("今天")
+        case .week: return L("本周")
+        case .earlier: return L("更早")
+        case .dormant: return L("沉睡")
         }
     }
 
@@ -164,7 +164,7 @@ struct ProjectTrailView: View {
             if dormant {
                 Text("💤").font(.system(size: Theme.fontSize(10)))
             }
-            if title == "待我判断" {
+            if title == L("待我判断") {
                 Text("🧑‍⚖️").font(.system(size: Theme.fontSize(10)))
             }
             Text(title)
@@ -256,14 +256,14 @@ struct ProjectTrailView: View {
         .onTapGesture { openInITerm(p.path) }
         .contextMenu {
             if p.status != nil {
-                Button("打开 STATUS.md") { openFile(p.path, "STATUS.md") }
-                Button("打开 ACCEPTANCE.md") { openFile(p.path, "ACCEPTANCE.md") }
-                Button("打开 DECISIONS.md") { openFile(p.path, "DECISIONS.md") }
+                Button(L("打开 STATUS.md")) { openFile(p.path, "STATUS.md") }
+                Button(L("打开 ACCEPTANCE.md")) { openFile(p.path, "ACCEPTANCE.md") }
+                Button(L("打开 DECISIONS.md")) { openFile(p.path, "DECISIONS.md") }
                 Divider()
             }
-            Button("在终端打开") { openInTerminal(p.path) }
-            Button("在 Ghostty 打开") { openInGhostty(p.path) }
-            Button("在 iTerm 打开") { openInITerm(p.path) }
+            Button(L("在终端打开")) { openInTerminal(p.path) }
+            Button(L("在 Ghostty 打开")) { openInGhostty(p.path) }
+            Button(L("在 iTerm 打开")) { openInITerm(p.path) }
             Divider()
             Button(L("在 Finder 中显示")) { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: p.path) }
             Button(L("用 VS Code 打开")) { openInVSCode(p.path) }
@@ -285,13 +285,13 @@ struct ProjectTrailView: View {
         let failing = tracked.filter { !$0.verify_failed.isEmpty }.count
         if !tracked.isEmpty {
             HStack(spacing: 6) {
-                statusChip("❓ \(needs) 待判断", needs > 0 ? Theme.qoder : Theme.tTertiary)
-                statusChip("⛔ \(blocked) 阻塞", blocked > 0 ? Theme.zed : Theme.tTertiary)
-                statusChip(failing > 0 ? "✗ \(failing) 验收失败" : "✓ 验收无失败",
+                statusChip(L("❓ %@ 待判断", needs), needs > 0 ? Theme.qoder : Theme.tTertiary)
+                statusChip(L("⛔ %@ 阻塞", blocked), blocked > 0 ? Theme.zed : Theme.tTertiary)
+                statusChip(failing > 0 ? L("✗ %@ 验收失败", failing) : L("✓ 验收无失败"),
                            failing > 0 ? Theme.zed : Theme.hermes)
                 Spacer(minLength: 0)
             }
-            .help("来自已接入 henry-hq 的 \(tracked.count) 个项目（STATUS.md / .hq/verify.json）")
+            .help(L("来自已接入 henry-hq 的 %@ 个项目（STATUS.md / .hq/verify.json）", tracked.count))
         }
     }
 
@@ -302,19 +302,19 @@ struct ProjectTrailView: View {
                     statusChip(s.value.isEmpty ? s.theme : "\(s.theme) · \(s.value)", Theme.tSecondary)
                 }
                 if s.state != "active" {
-                    statusChip(s.state == "parked" ? "搁置" : s.state, Theme.tTertiary)
+                    statusChip(s.state == "parked" ? L("搁置") : s.state, Theme.tTertiary)
                 }
                 if !s.needs_you.isEmpty { statusChip("❓\(s.needs_you.count)", Theme.qoder) }
                 if !s.blocked.isEmpty { statusChip("⛔\(s.blocked.count)", Theme.zed) }
                 if s.verify_total > 0 {
                     let ok = s.verify_failed.isEmpty
                     statusChip("\(ok ? "✓" : "✗") \(s.verify_passed)/\(s.verify_total)", ok ? Theme.hermes : Theme.zed)
-                        .help(ok ? "机器验收全部通过 · \(s.verify_at)" : "未通过：\(s.verify_failed.joined(separator: ", "))")
+                        .help(ok ? L("机器验收全部通过 · %@", s.verify_at) : L("未通过：%@", s.verify_failed.joined(separator: ", ")))
                 }
-                if s.answered > 0 { statusChip("已答复 \(s.answered)", Theme.tTertiary) }
+                if s.answered > 0 { statusChip(L("已答复 %@", s.answered), Theme.tTertiary) }
                 if s.gate_gave_up_24h > 0 {
-                    statusChip("闸门放弃 \(s.gate_gave_up_24h)", Theme.zed)
-                        .help("近 24 小时 agent 两次没能通过验收闸门，被迫放行")
+                    statusChip(L("闸门放弃 %@", s.gate_gave_up_24h), Theme.zed)
+                        .help(L("近 24 小时 agent 两次没能通过验收闸门，被迫放行"))
                 }
             }
             if !s.summary.isEmpty {

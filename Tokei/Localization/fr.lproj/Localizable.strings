@@ -242,7 +242,6 @@
 "常规额度外" = "Au-delà du quota régulier";
 "平均深度" = "Instantané de contexte du jour";
 "年" = "Total aujourd'hui";
-"应用活跃统计" = "Réponses du jour";
 "开启后使用 Grok Bot 自身登录态查询官方额度和 Token，并按 5 分钟缓存。首次使用时确认一次系统授权；专用只读助手会保留授权，Tokei 重启和升级无需重复确认。登录 Token 仅在助手进程内存中使用。" = "Une fois activé, utilise la session de Grok Bot pour consulter les quotas et tokens officiels (mis en cache 5 min). Confirmez l'invite système à la première utilisation ; l'assistant dédié conserve l'autorisation. Les jetons restent en mémoire de l'assistant.";
 "开放 API（api.x.ai）" = "API publique (api.x.ai)";
 "当前展示最近一次成功结果；登录态或网络恢复后会自动刷新。" = "Affichage du dernier résultat réussi ; s'actualise automatiquement dès que la connexion ou le réseau est rétabli.";
@@ -369,7 +368,6 @@
 "照这个用法，整个周期约" = "À ce rythme, le cycle complet ≈";
 "版本与更新" = "Version et mises à jour";
 "用 VS Code 打开" = "Ouvrir dans VS Code";
-"用于了解应用的活跃安装数量，默认开启，可随时关闭。每次启动仅尝试上报一次随机安装 ID、Tokei 版本及系统名称和主次版本。服务端记录首次和最近活跃时间，并保存最近一次来源 IP。不会上传账号、项目、对话、Token、费用或额度。关闭后停止发送，重新开启于下次启动生效；安装 ID 不参与多设备同步。" = "Utilisé pour évaluer le nombre d'installations actives. Activé par défaut, désactivable à tout moment. Envoie un ID aléatoire, version de Tokei et OS. Aucun compte, projet, jeton ou quota n'est téléversé.";
 "用到%@%%" = "%@%% utilisé";
 "用量结构" = "Structure d'utilisation";
 "用量统计不受影响；检测到订阅周期后会自动展示。" = "Statistiques non affectées ; affiché automatiquement dès la détection d'un cycle.";
