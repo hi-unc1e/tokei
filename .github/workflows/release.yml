@@ -21,11 +21,33 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     env:
-      # 公开发布固定 ad-hoc 签名，产物不依赖构建机上的个人证书。
+      # 稳定签名身份（TOKEI_CODESIGN_P12 / TOKEI_CODESIGN_PASSWORD 两个 secret 存在时启用）：
+      # ad-hoc 签名每次构建指纹都不同，macOS 钥匙串 ACL 按签名身份记忆授权，
+      # 会导致每次升级后读取 Keychain 凭据都重新弹授权框；固定证书后“始终允许”一次永久生效。
       TOKEI_CODESIGN_IDENTITY: '-'
       TOKEI_LOCAL_BUILD: '0'
     steps:
       - uses: actions/checkout@v4
+
+      - name: Import stable codesigning identity
+        env:
+          TOKEI_CODESIGN_P12: ${{ secrets.TOKEI_CODESIGN_P12 }}
+          TOKEI_CODESIGN_PASSWORD: ${{ secrets.TOKEI_CODESIGN_PASSWORD }}
+        run: |
+          if [ -z "$TOKEI_CODESIGN_P12" ]; then
+            echo "未配置 TOKEI_CODESIGN_P12 secret，回退 ad-hoc 签名"
+            exit 0
+          fi
+          echo "${TOKEI_CODESIGN_P12}" | base64 --decode > /tmp/tokei-codesign.p12
+          security create-keychain -p '' build.keychain
+          security unlock-keychain -p '' build.keychain
+          security import /tmp/tokei-codesign.p12 -k build.keychain \
+            -P "$TOKEI_CODESIGN_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s build.keychain login.keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k '' build.keychain
+          rm -f /tmp/tokei-codesign.p12
+          # 后续步骤用这个身份签名
+          echo "TOKEI_CODESIGN_IDENTITY=Tokei Fork Release" >> "$GITHUB_ENV"
 
       - name: Read version from Updater.swift
         id: version
