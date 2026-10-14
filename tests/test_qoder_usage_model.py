@@ -16,6 +16,7 @@ class QoderUsageModelTests(unittest.TestCase):
                     "swiftc",
                     "-parse-as-library",
                     str(ROOT / "Tokei/Sources/Tokei/Model.swift"),
+                    str(ROOT / "Tokei/Sources/Tokei/L10n.swift"),
                     str(ROOT / "tests/swift/QoderUsageModelCheck.swift"),
                     "-o",
                     str(binary),
@@ -47,6 +48,8 @@ class QoderUsageModelTests(unittest.TestCase):
         self.assertIn("active: qr.calls > 0 || qr.in + qr.cached + qr.out > 0", cards)
         self.assertIn("active: qwr.calls > 0 || qwr.totalTokens > 0", cards)
         self.assertIn("active: qclir.calls > 0 || qclir.totalTokens > 0", cards)
+        self.assertIn("active: qclicnr.calls > 0 || qclicnr.totalTokens > 0", cards)
+        self.assertIn("u.qodercliCN, qclicnr", cards, "国内版卡片只读自己的范围")
 
         work_start = source.index("func qoderworkBlock")
         cli_start = source.index("func qodercliBlock", work_start)
@@ -62,7 +65,11 @@ class QoderUsageModelTests(unittest.TestCase):
 
     def test_qoder_cli_summary_and_sync_use_cli_exact_tokens(self):
         summary = (ROOT / "Tokei/Sources/Tokei/UsageSummaryBuilder.swift").read_text()
-        cli_start = summary.index('id: "qodercli"')
+        self.assertIn('appendQoderCli(&lines, id: "qodercli", name: "Qoder CLI",\n'
+                      '                           range: usage.qodercli.ranges.get(range))', summary)
+        self.assertIn('appendQoderCli(&lines, id: "qodercli_cn", name: "Qoder CN",\n'
+                      '                           range: usage.qodercliCN.ranges.get(range))', summary)
+        cli_start = summary.index("private static func appendQoderCli")
         cli_end = summary.index("if !line.isEmpty", cli_start)
         cli_line = summary[cli_start:cli_end]
         self.assertIn("tokens: r.totalTokens", cli_line)
@@ -73,6 +80,10 @@ class QoderUsageModelTests(unittest.TestCase):
         sync = (ROOT / "Tokei/Sources/Tokei/SyncManager.swift").read_text()
         self.assertIn(
             "mergeRanges(&u.qodercli.ranges, peer.usage.qodercli.ranges, pairs)",
+            sync,
+        )
+        self.assertIn(
+            "mergeRanges(&u.qodercliCN.ranges, peer.usage.qodercliCN.ranges, pairs)",
             sync,
         )
         merge_start = sync.index("private static func mergeRanges(_ dst: inout QoderRanges")
@@ -86,11 +97,15 @@ class QoderUsageModelTests(unittest.TestCase):
         dashboard = (ROOT / "Tokei/Sources/Tokei/DashboardView.swift").read_text()
         self.assertIn("let qodercli = usage.qodercli.ranges.get(key)", dashboard)
         self.assertIn("+ qodercli.totalTokens", dashboard)
-        self.assertIn('tool: "qodercli"', dashboard)
+        self.assertIn("+ qodercliCN.totalTokens", dashboard)
+        self.assertIn('("qodercli", "Qoder CLI", usage.qodercli)', dashboard)
+        self.assertIn('("qodercli_cn", "Qoder CN", usage.qodercliCN)', dashboard)
+        self.assertIn('case "qodercli_cn": return Theme.qodercliCN', dashboard)
 
         main = (ROOT / "Tokei/Sources/Tokei/main.swift").read_text()
         self.assertIn("showQoderCli", main)
         self.assertIn("u.qodercli.ranges.get(.today)", main)
+        self.assertIn("u.qodercliCN.ranges.get(.today)", main)
         self.assertIn("total += r.totalTokens", main)
 
 

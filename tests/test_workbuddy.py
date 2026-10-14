@@ -68,6 +68,104 @@ class WorkBuddyUsageRecordTests(unittest.TestCase):
         self.assertEqual(USAGE._resolve_id("Hy3"), "tencent/hy3")
         self.assertEqual(USAGE._resolve_id("Hy3 preview"), "tencent/hy3-preview")
 
+    def test_models_without_a_public_price_are_not_given_a_guessed_dollar_cost(self):
+        """以前查不到价就按 Opus 兜底价算，混元、Step 这类模型被多算几百美元。"""
+        def item(model):
+            return {
+                "id": f"item-{model}", "sessionId": "session-1",
+                "timestamp": 1_704_672_000_000,
+                "providerData": {"requestModelName": model,
+                                 "rawUsage": {"prompt_tokens": 1_000_000,
+                                              "completion_tokens": 100_000}},
+            }
+
+        unknown = USAGE._workbuddy_usage_record(item("made-up-model-x"))
+        self.assertIsNone(USAGE._pricing_id("made-up-model-x"))
+        self.assertEqual(unknown["cost"], 0.0)
+        self.assertEqual(unknown["in"], 1_000_000, "token 照常计入")
+
+        priced = USAGE._workbuddy_usage_record(item("Hy3"))
+        self.assertGreater(priced["cost"], 0, "有公开价的模型照常估算")
+
+    def test_pi_and_qwen_do_not_guess_a_price_for_unknown_models(self):
+        usage = {"input": 1_000_000, "output": 100_000}
+        self.assertEqual(USAGE._pi_usage_cost(usage, "made-up-model-x"), 0.0)
+        self.assertGreater(USAGE._pi_usage_cost(usage, "claude-sonnet-5"), 0)
+        *_tokens, cost = USAGE._qwen_usage_parts(
+            "made-up-model-x", {"inputTokens": 1_000_000, "outputTokens": 100_000})
+        self.assertEqual(cost, 0.0)
+
+    def test_bare_model_names_are_priced_from_the_catalog(self):
+        """不带厂商前缀的名字按名字到价目表（OpenRouter）里找，只认唯一匹配。"""
+        catalog = {
+            "tencent/hy4-preview": {"in": 0.834, "out": 2.501, "cache_read": 0.042},
+            "openrouter/auto": {"in": -1_000_000, "out": -1_000_000},
+            "vendor-a/twin": {"in": 1.0, "out": 2.0},
+            "vendor-b/twin": {"in": 3.0, "out": 4.0},
+            "vendor-a/solo:batch": {"in": 0.5, "out": 1.0},
+        }
+        with mock.patch.object(USAGE, "_PRICING_DB", catalog), \
+             mock.patch.object(USAGE, "_CATALOG_INDEX", None):
+            self.assertEqual(USAGE._normalize("Hy4 preview"), "tencent/hy4-preview")
+            self.assertEqual(USAGE._normalize("custom-local:hy4-preview"), "tencent/hy4-preview")
+            self.assertEqual(USAGE._normalize("auto"), "auto", "路由占位不算价")
+            self.assertEqual(USAGE._normalize("twin"), "twin", "两家同名说不清是哪家")
+            self.assertEqual(USAGE._normalize("solo"), "solo", ":batch 变体不参与")
+        # 阶跃还没有官方价、OpenRouter 也未上架：内置第三方网关价兜底
+        self.assertEqual(USAGE._pricing_id("step-5-preview"), "stepfun/step-5-preview")
+        self.assertEqual(USAGE.nice_model("Hy4 preview"), USAGE.nice_model("tencent/hy4-preview"))
+
+    def test_ledger_costs_are_repriced_from_tokens(self):
+        """账本迁移：没有公开价的清零；查得到价的按 token × 现价重算（旧版按 Opus 猜的、
+        上一版清零的都改对）；来源和当天合计一起调整，token 不动。"""
+        def model(inp, out, cost):
+            return {"in": inp, "out": out, "cost": cost}
+
+        def day():
+            return {"in": 3_000_000, "out": 300_000, "cost": 20.0,
+                    "models": {"made-up-model-x": model(1_000_000, 100_000, 10.0),
+                               "Hy4 preview": model(1_000_000, 100_000, 0.0),
+                               "Hy3": model(1_000_000, 100_000, 10.0)},
+                    "_sources": {
+                        "legacy": {"in": 2_000_000, "out": 200_000, "cost": 20.0,
+                                   "models": {"made-up-model-x": model(1_000_000, 100_000, 10.0),
+                                              "Hy3": model(1_000_000, 100_000, 10.0)}},
+                        "abc": {"in": 1_000_000, "out": 100_000, "cost": 0.0,
+                                "models": {"Hy4 preview": model(1_000_000, 100_000, 0.0)}},
+                    }}
+
+        def expected(name):
+            p = USAGE._raw_price(USAGE._pricing_id(name))
+            return (1_000_000 * p["in"] + 100_000 * p["out"]) / 1e6
+
+        saved = {}
+        USAGE._LEDGER_CACHE["data"] = {"v": USAGE._LEDGER_VERSION,
+                                       "tools": {"workbuddy_ai": {"2026-09-01": day()}}}
+        USAGE._LEDGER_CACHE["dirty"] = False
+        try:
+            with mock.patch.object(USAGE, "_load_ledger_from_disk", return_value={
+                    "v": USAGE._LEDGER_VERSION,
+                    "tools": {"workbuddy_ai": {"2026-09-01": day()}}}), \
+                 mock.patch.object(USAGE, "_save_ledger",
+                                   side_effect=lambda value: saved.update(value)):
+                USAGE._prepare_unpriced_cost_ledger("workbuddy_ai")
+                USAGE._prepare_unpriced_cost_ledger("workbuddy_ai")  # 只迁一次
+                USAGE.ledger_flush()
+        finally:
+            USAGE._LEDGER_CACHE["data"] = None
+            USAGE._LEDGER_CACHE["dirty"] = False
+
+        stored = saved["tools"]["workbuddy_ai"]["2026-09-01"]
+        hy4, hy3 = expected("Hy4 preview"), expected("Hy3")
+        self.assertEqual(stored["models"]["made-up-model-x"]["cost"], 0.0)
+        self.assertAlmostEqual(stored["models"]["Hy4 preview"]["cost"], hy4)
+        self.assertAlmostEqual(stored["models"]["Hy3"]["cost"], hy3)
+        self.assertAlmostEqual(stored["cost"], hy4 + hy3, msg="磁盘上的旧高水位不能合并回来")
+        self.assertAlmostEqual(stored["_sources"]["legacy"]["cost"], hy3)
+        self.assertAlmostEqual(stored["_sources"]["abc"]["cost"], hy4)
+        self.assertEqual((stored["in"], stored["out"]), (3_000_000, 300_000))
+        self.assertEqual(saved["workbuddy_ai_unpriced_schema"], USAGE._UNPRICED_COST_SCHEMA)
+
     def test_anthropic_style_cache_fields_are_disjoint_without_total(self):
         item = {
             "id": "item-2",

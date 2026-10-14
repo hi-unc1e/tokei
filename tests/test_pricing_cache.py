@@ -80,8 +80,8 @@ class PricingCacheTests(unittest.TestCase):
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(USAGE.update_prices(), 0)
 
-            self.assertTrue(scan_cache.exists())
-            saved_cache = json.loads(scan_cache.read_text(encoding="utf-8"))
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache)):
+                saved_cache, _ = USAGE._read_scan_cache_file()
             self.assertEqual(saved_cache["v"], USAGE._SCAN_CACHE_VERSION)
             self.assertIn("test/model", saved_cache["_pricing_changed_models"])
             self.assertTrue(saved_cache["_pricing_changed"])
@@ -117,8 +117,8 @@ class PricingCacheTests(unittest.TestCase):
                 **historical,
                 "retired": True,
             })
-            changed = json.loads(scan_cache.read_text(encoding="utf-8")).get(
-                "_pricing_changed_models", [])
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache)):
+                changed = USAGE._read_scan_cache_file()[0].get("_pricing_changed_models", [])
             self.assertNotIn("historical/model", changed)
 
     def test_price_fingerprint_keeps_all_token_scan_caches(self):
@@ -227,6 +227,102 @@ class PricingCacheTests(unittest.TestCase):
             self.assertEqual(shipped["models"][model], price)
         for alias, model in USAGE._BUILTIN_OVERRIDE_ALIASES.items():
             self.assertEqual(shipped["aliases"][alias], model)
+
+    def test_codex_model_rows_show_the_price_their_cost_used(self):
+        """卡片上的单价必须就是算成本用的那个价：没有公开价的按 gpt-5.5 估算，要标出参照。"""
+        rows = {row["name"]: row for row in USAGE._format_token_models({
+            "gpt-6.1-sol": {"in": 1_000_000, "cost": 2.0},
+            "codex-auto-review": {"in": 1_000_000, "cost": 5.0},
+        }, price_model=USAGE._codex_price_model)}
+
+        sol = rows["GPT-6.1 Sol"]
+        self.assertEqual((sol["pin"], sol["pout"], sol["pcr"]), (2.0, 10.0, 0.1))
+        self.assertIsNone(sol["pref"], "官方价就是它自己的价")
+        # 10 万 token：避开超过 27.2 万输入时的长上下文加价
+        self.assertAlmostEqual(USAGE._codex_estimated_cost("gpt-6.1-sol", 100_000, 0, 0), 0.2)
+
+        review = rows["Codex Auto Review"]
+        self.assertEqual((review["pin"], review["pout"]), (5.0, 30.0))
+        self.assertEqual(review["pref"], "GPT-5.5")
+        self.assertAlmostEqual(USAGE._codex_estimated_cost("codex-auto-review", 100_000, 0, 0),
+                               review["pin"] / 10)
+
+    def test_unlisted_models_use_the_previous_version_of_their_line(self):
+        """价目表里没有的沿用同一版本线上一个版本的价：先找同档位，再找基础款。"""
+        catalog = {
+            "minimax/minimax-m3": {"in": 0.3, "out": 1.2},
+            "minimax/minimax-m2.7": {"in": 0.3, "out": 1.2},
+            "minimax/minimax-01": {"in": 0.2, "out": 1.1},
+            "openai/gpt-6-sol": {"in": 2.0, "out": 10.0},
+            "openai/gpt-6.1-sol": {"in": 2.0, "out": 10.0},
+            "openai/gpt-6-astra": {"in": 10.0, "out": 50.0},
+            "deepseek/deepseek-v4-pro": {"in": 0.9, "out": 1.9},
+            "deepseek/deepseek-v4.1-flash": {"in": 0.3, "out": 1.2},
+            "tencent/hy4-preview": {"in": 0.834, "out": 2.501},
+            "vendor-a/twin-2": {"in": 1.0, "out": 1.0},
+            "vendor-b/twin-2": {"in": 2.0, "out": 2.0},
+        }
+        with mock.patch.object(USAGE, "_PRICING_DB", catalog), \
+             mock.patch.object(USAGE, "_DEFAULT_PRICES", {}), \
+             mock.patch.object(USAGE, "_OV_MODELS", {}), \
+             mock.patch.object(USAGE, "_CATALOG_INDEX", None):
+            cases = {
+                "MiniMax-M3.1-Flash-Preview": "minimax/minimax-m3",   # 没有 flash 档，退到基础款
+                "gpt-6.2-sol": "openai/gpt-6.1-sol",                  # 同档位里最近的上一版
+                "deepseek-v4.2-flash": "deepseek/deepseek-v4.1-flash",  # 不再被家族兜底按 pro 算
+                "Hy4-dev": "tencent/hy4-preview",                     # 同版本只有 preview 也认
+                "twin-3": None,                                       # 两家都有，说不清是谁
+                "codex-auto-review": None,                            # 没有版本号，不猜
+            }
+            for model, expected in cases.items():
+                with self.subTest(model=model):
+                    self.assertEqual(USAGE._pricing_id(model), expected)
+
+            rows = USAGE._format_token_models({"MiniMax-M3.1-Flash-Preview": {"in": 1000, "cost": 0.1}})
+            self.assertEqual((rows[0]["pin"], rows[0]["pout"]), (0.3, 1.2))
+            self.assertEqual(rows[0]["pref"], "MiniMax M3", "借来的单价要标出参照")
+
+    def test_new_claude_generation_does_not_borrow_previous_generation_price(self):
+        """OpenRouter 还没收录时，Haiku 5.5 用内置官方价，不会按 Haiku 4.5 计成 10 倍。"""
+        with mock.patch.object(USAGE, "_PRICING_DB", {}), \
+             mock.patch.object(USAGE, "_CATALOG_INDEX", None):
+            for model in ("claude-haiku-5-5", "claude-haiku-5-5-20261007"):
+                with self.subTest(model=model):
+                    self.assertEqual(USAGE._resolve_id(model), "anthropic/claude-haiku-5.5")
+            price = USAGE.price_for("claude-haiku-5-5")
+            self.assertEqual(
+                (price["in"], price["out"], price["cache_read"], price["write5m"], price["write1h"]),
+                (0.1, 0.5, 0.01, 0.125, 0.2),
+            )
+            self.assertEqual(USAGE._resolve_id("claude-opus-5-5"), "anthropic/claude-opus-5.5")
+            self.assertEqual(USAGE.price_for("claude-opus-5-5")["in"], 4.0)
+
+    def test_haiku_55_long_prompts_bill_the_whole_request_at_the_higher_tier(self):
+        """提示（输入 + 缓存读 + 缓存写）超过 100K 时，这次请求整体按 5 倍计。"""
+        at_limit = {"model": "claude-haiku-5-5", "in": 0, "out": 1_000_000, "cr": 100_000, "cw": 0}
+        self.assertAlmostEqual(USAGE._claude_event_cost(at_limit), 0.5 + 0.001)
+        over = dict(at_limit, cr=100_001)
+        self.assertAlmostEqual(USAGE._claude_event_cost(over), (0.5 + 100_001 * 0.01 / 1e6) * 5)
+        opus = dict(at_limit, model="claude-opus-5-5", cr=500_000)
+        self.assertAlmostEqual(USAGE._claude_event_cost(opus), 20.0 + 0.1)
+
+    def test_long_prompt_rule_change_reprices_cached_haiku_events(self):
+        """分档规则算进价格指纹：规则一变，缓存里的 Haiku 5.5 成本跟着重算。"""
+        previous = json.loads(json.dumps(USAGE._PRICING_EFFECTIVE))
+        previous["anthropic/claude-haiku-5.5"].pop("long_prompt")
+        with tempfile.TemporaryDirectory() as tmp:
+            scan_cache = Path(tmp) / "scan-cache.json"
+            scan_cache.write_text(json.dumps({
+                "v": USAGE._SCAN_CACHE_VERSION,
+                "_pricing_fingerprint": "old",
+                "_pricing_effective": previous,
+                "_pricing_aliases": USAGE._OV_ALIASES,
+            }), encoding="utf-8")
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache)):
+                loaded = USAGE._load_scan_cache()
+
+        self.assertIn("anthropic/claude-haiku-5.5", loaded["_pricing_changed_models"])
+        self.assertNotIn("anthropic/claude-opus-5.5", loaded["_pricing_changed_models"])
 
     def test_current_official_and_snapshot_prices_resolve_exactly(self):
         self.assertEqual(USAGE._resolve_id("gpt-5.6"), "openai/gpt-5.6-sol")

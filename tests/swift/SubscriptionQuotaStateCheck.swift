@@ -3,6 +3,8 @@ import Foundation
 @main
 struct SubscriptionQuotaStateCheck {
     static func main() throws {
+        // 断言的是中文输出，不能随跑测试那台机器的系统语言变化。
+        L10n.forcedLanguage = .zh
         try expect(
             SubscriptionQuotaState.resolve([
                 (value: nil, stale: nil),
@@ -30,10 +32,20 @@ struct SubscriptionQuotaStateCheck {
             (value: 73, stale: true),
         ])
         try expect(expired == .expired, "all stale quota windows should be expired")
-        try expect(expired.shouldUseCompactCard(hasUsage: false),
-                   "expired quota-only cards should be compact")
-        try expect(!expired.shouldUseCompactCard(hasUsage: true),
-                   "cards with usage should keep their full presentation")
+
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        try expect(SubscriptionQuotaPresentation.hasResetSinceReading(
+                       stale: true, reset: 1_800_000_000 - 60, now: now),
+                   "a stale reading whose window already reset belongs to the previous window")
+        try expect(!SubscriptionQuotaPresentation.hasResetSinceReading(
+                       stale: true, reset: 1_800_000_000 + 60, now: now),
+                   "a stale reading inside its window is still shown as the last known value")
+        try expect(!SubscriptionQuotaPresentation.hasResetSinceReading(
+                       stale: false, reset: 1_800_000_000 - 60, now: now),
+                   "fresh readings are left alone")
+        try expect(!SubscriptionQuotaPresentation.hasResetSinceReading(
+                       stale: true, reset: nil, now: now),
+                   "without a reset time there is nothing to compare")
 
         try expect(SubscriptionQuotaPresentation.remainingLabel(0) == "已用尽",
                    "zero remaining should use an explicit exhausted label")

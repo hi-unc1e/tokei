@@ -74,12 +74,14 @@ final class DataLoader {
 
     // 首次全量定位 /usage，之后只检查变化项并复用最近一次有效候选。
     private struct ClaudeCacheRecord {
-        let url: URL
+        let path: String
         let modified: TimeInterval
         let size: Int
 
+        var url: URL { URL(fileURLWithPath: path) }
+
         var signature: String {
-            "\(url.path)|\(modified.bitPattern)|\(size)"
+            "\(path)|\(modified.bitPattern)|\(size)"
         }
     }
 
@@ -100,7 +102,7 @@ final class DataLoader {
     }
 
     private struct ClaudeQuotaState: Codable, Equatable {
-        var version = 2
+        var version = 3
         var candidate: ClaudeQuotaCandidate?
         var snapshot: ClaudeQuotaSnapshot?
         var scanModified: TimeInterval = -1
@@ -112,6 +114,10 @@ final class DataLoader {
     private static let claudeQuotaFullScanInterval = 6 * 60 * 60
     private static let claudeQuotaRetryScanInterval = 5 * 60
     private static let claudeCacheFileLimit = 16 * 1024 * 1024
+    /// 修改时间晚于「现在 + 5 分钟」的缓存文件不可信（实机见过 2037 年的残留）：
+    /// 记成水位线后真正的新文件永远比它旧，增量扫描就此失效。这类文件当作还不存在，
+    /// 不解析也不参与水位线；与采集器的 _CLAUDE_QUOTA_FUTURE_SKEW 同一口径。
+    private static let claudeQuotaFutureSkew: TimeInterval = 5 * 60
     private static let claudeQuotaScanLock = NSLock()
     private static let zstdMagic = Data([0x28, 0xb5, 0x2f, 0xfd])
     private static let deepSeekPreparationLock = NSLock()
@@ -140,24 +146,32 @@ final class DataLoader {
             cacheDir = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support/Claude/Cache/Cache_Data")
         }
-        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .fileSizeKey]
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: cacheDir,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
-        return urls.compactMap { url in
-            guard url.lastPathComponent.hasSuffix("_0"),
-                  let values = try? url.resourceValues(forKeys: keys),
-                  let modified = values.contentModificationDate,
-                  let size = values.fileSize else { return nil }
-            return ClaudeCacheRecord(
-                url: url.resolvingSymlinksInPath(),
-                modified: modified.timeIntervalSince1970,
-                size: size
-            )
-        }.sorted {
-            if $0.modified == $1.modified { return $0.url.path > $1.url.path }
+        // 缓存目录里有两万多个文件，每次刷新都要列一遍。逐个建 URL、读资源属性、解析软链接要
+        // 好几百毫秒，是 App 空闲时 CPU 的大头；这里目录只解析一次，文件用 lstat 读修改时间和大小。
+        // 时间按 Foundation 的换算方式（先减到 2001 年参考时间再加纳秒）算，和以前读出的值逐位
+        // 一致，已存的额度状态签名照样对得上。
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: cacheDir.path) else {
+            return []
+        }
+        let directory = cacheDir.resolvingSymlinksInPath().path
+        var records: [ClaudeCacheRecord] = []
+        records.reserveCapacity(names.count)
+        for name in names where name.hasSuffix("_0") && !name.hasPrefix(".") {
+            var path = directory + "/" + name
+            var info = stat()
+            guard lstat(path, &info) == 0 else { continue }
+            if (info.st_mode & S_IFMT) == S_IFLNK {
+                path = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+                guard stat(path, &info) == 0 else { continue }
+            }
+            guard (info.st_mode & S_IFMT) == S_IFREG else { continue }
+            let modified = Date(timeIntervalSinceReferenceDate: Double(info.st_mtimespec.tv_sec)
+                                - 978_307_200 + Double(info.st_mtimespec.tv_nsec) * 1.0e-9)
+            records.append(ClaudeCacheRecord(path: path, modified: modified.timeIntervalSince1970,
+                                             size: Int(info.st_size)))
+        }
+        return records.sorted {
+            if $0.modified == $1.modified { return $0.path > $1.path }
             return $0.modified > $1.modified
         }
     }
@@ -165,7 +179,7 @@ final class DataLoader {
     private static func loadClaudeQuotaState() -> ClaudeQuotaState {
         guard let data = try? Data(contentsOf: claudeQuotaStateURL),
               let state = try? JSONDecoder().decode(ClaudeQuotaState.self, from: data),
-              state.version == 2 else { return ClaudeQuotaState() }
+              state.version == 3 else { return ClaudeQuotaState() }
         return state
     }
 
@@ -243,9 +257,24 @@ final class DataLoader {
         return result
     }
 
+    /// 缓存目录里两万多个文件，扫一遍要几百毫秒；一次刷新要用两遍，面板开着时 10 秒刷新一次。
+    /// 而这份额度要等 Claude 桌面版自己去刷新才会变（几分钟一次），所以 60 秒内直接复用上次的结果。
+    private static let claudeQuotaScanReuse: TimeInterval = 60
+    private static var lastClaudeQuotaScan: (at: Date, result: [String: Any]?)?
+
     static func scanClaudeQuota(now: Date = Date()) -> [String: Any]? {
         claudeQuotaScanLock.lock()
         defer { claudeQuotaScanLock.unlock() }
+        if let last = lastClaudeQuotaScan {
+            let age = now.timeIntervalSince(last.at)
+            if age >= 0 && age < claudeQuotaScanReuse { return last.result }
+        }
+        let result = scanClaudeQuotaNow(now: now)
+        lastClaudeQuotaScan = (now, result)
+        return result
+    }
+
+    private static func scanClaudeQuotaNow(now: Date) -> [String: Any]? {
         let nowEpoch = Int(now.timeIntervalSince1970)
         // 全量扫描要挨个探测缓存文件（含 zstd 解压）。Claude 桌面版的缓存目录
         // 能涨到两万多个文件，不设上限的话一次扫描可以吃掉几分钟，把整条刷新
@@ -253,7 +282,7 @@ final class DataLoader {
         let scanDeadline = now.addingTimeInterval(20)
         let records = claudeCacheRecords()
         var recordsByPath: [String: ClaudeCacheRecord] = [:]
-        for record in records { recordsByPath[record.url.path] = record }
+        for record in records { recordsByPath[record.path] = record }
         let original = loadClaudeQuotaState()
         var state = original
         let initialScan = state.scanModified < 0
@@ -266,7 +295,7 @@ final class DataLoader {
         var selected: (ClaudeCacheRecord, ClaudeQuotaSnapshot)?
 
         func inspect(_ record: ClaudeCacheRecord) -> (ClaudeCacheRecord, ClaudeQuotaSnapshot)? {
-            inspected.insert(record.url.path)
+            inspected.insert(record.path)
             guard let snapshot = parseClaudeQuota(record) else { return nil }
             return (record, snapshot)
         }
@@ -285,7 +314,7 @@ final class DataLoader {
             if let record = candidateRecord {
                 let changedCandidate = record.modified != candidate.modified || record.size != candidate.size
                 if changedCandidate {
-                    if !inspected.contains(record.url.path) {
+                    if !inspected.contains(record.path) {
                         selected = inspect(record)
                     }
                     candidateInvalid = selected == nil
@@ -341,8 +370,8 @@ final class DataLoader {
         let needsFullScan = candidateInvalid || nowEpoch - state.lastFullScan >= retryInterval
         var scanDeadlineHit = false
         if selected == nil && needsFullScan {
-            for record in records where !inspected.contains(record.url.path) {
-                inspected.insert(record.url.path)
+            for record in records where !inspected.contains(record.path) {
+                inspected.insert(record.path)
                 if let snapshot = parseClaudeQuota(record) {
                     selected = (record, snapshot)
                     break
@@ -359,7 +388,7 @@ final class DataLoader {
 
         if let (record, snapshot) = selected {
             state.candidate = ClaudeQuotaCandidate(
-                path: record.url.path,
+                path: record.path,
                 modified: record.modified,
                 size: record.size
             )
@@ -556,7 +585,7 @@ final class DataLoader {
                 raw["claude"] = claude
             }
             guard let cleaned = try? JSONSerialization.data(withJSONObject: raw),
-                  let usage = try? JSONDecoder().decode(Usage.self, from: cleaned)
+                  let usage = try? Usage.decode(from: cleaned)
             else { continue }
             return usage
         }
@@ -611,7 +640,7 @@ final class DataLoader {
                 raw["claude"] = claude
             }
             let cleaned = try JSONSerialization.data(withJSONObject: raw)
-            let usage = try JSONDecoder().decode(Usage.self, from: cleaned)
+            let usage = try Usage.decode(from: cleaned)
             persistCachedUsage(cleaned)
             return usage
         } catch {
@@ -696,11 +725,39 @@ final class DataLoader {
         return "/usr/bin/env"
     }()
 
+    /// 以 __main__ 身份导入采集器，字节码缓存放到 ~/.tokei/cache/pycache。直接运行
+    /// `python3 usage.30s.py` 时 Python 不缓存主脚本，每轮刷新都要把七十多万字节的脚本重新编译一遍。
+    /// 缓存目录在 App 包外面，不会写进 Contents/Resources 破坏签名，所以环境里即使设了
+    /// PYTHONDONTWRITEBYTECODE 也照样写；不支持 pycache_prefix 的老 Python（3.8 以前）干脆不写缓存。
+    private static let scriptLauncherPython = """
+    import importlib.util
+    import os
+    import sys
+
+    script_path = sys.argv[1]
+    sys.argv = sys.argv[1:]
+    if sys.version_info >= (3, 8):
+        sys.pycache_prefix = os.path.join(os.path.expanduser("~"), ".tokei", "cache", "pycache")
+        sys.dont_write_bytecode = False
+    else:
+        sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location("__main__", script_path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(1)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["__main__"] = module
+    spec.loader.exec_module(module)
+    """
+
+    /// 这段脚本以模块方式导入 App 包里的采集器。不关掉字节码缓存的话，Python 会把
+    /// __pycache__ 写进 Contents/Resources，App 签名随即失效
+    /// （codesign: a sealed resource is missing or invalid）。
     private static let syncSnapshotPython = """
     import importlib.util
     import os
     import sys
 
+    sys.dont_write_bytecode = True
     script_path, device_id, sync_dir, claude_quota = sys.argv[1:5]
     if claude_quota:
         os.environ["TOKEI_CLAUDE_QUOTA_JSON"] = claude_quota
@@ -745,10 +802,10 @@ final class DataLoader {
         let proc = Process()
         if pythonPath == "/usr/bin/env" {
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            proc.arguments = ["python3", scriptPath] + args
+            proc.arguments = ["python3", "-c", scriptLauncherPython, scriptPath] + args
         } else {
             proc.executableURL = URL(fileURLWithPath: pythonPath)
-            proc.arguments = [scriptPath] + args
+            proc.arguments = ["-c", scriptLauncherPython, scriptPath] + args
         }
         var environment = ProcessInfo.processInfo.environment
         environment["TOKEI_DSH_DECOMPRESSED_DIR"] = deepSeekSessions.path

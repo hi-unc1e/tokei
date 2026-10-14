@@ -433,9 +433,11 @@ class CodexLunaReserveTests(unittest.TestCase):
         self.assertIn("var stale: Bool?", model)
         # 过期的 Reserve 读数不得当成当前值展示。原先的做法是整行藏掉，但额度
         # 在「有」和「没有」之间反复横跳同样让人看不懂，所以改成照常画出来、
-        # 压暗并标记 stale，过期提示仍然保留——要求从"藏起来"变成"标记出来"。
+        # 压暗并标记 stale。Reserve 只在窗口翻篇后才会过期，这一行写「已重置」
+        # 而不是旧百分比；卡片底部落款「上次读到」，不再用警告框。
         self.assertIn("stale: q.stale == true", panel)
-        self.assertIn("Reserve 额度读数已过期", panel)
+        self.assertIn("x.reserveQuota?.stale == true", panel)
+        self.assertIn("SubscriptionQuotaPresentation.hasResetSinceReading", panel)
         self.assertIn("+ reserve.tokens", dashboard)
         self.assertIn("+ (usage.codex.reserveRanges?.get(key).cost ?? 0)", dashboard)
         self.assertIn("total += r.tokens + reserve.tokens", main)

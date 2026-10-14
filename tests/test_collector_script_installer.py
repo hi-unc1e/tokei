@@ -27,7 +27,9 @@ class CollectorScriptInstallerTests(unittest.TestCase):
                 [swiftc, str(security), str(installer), str(harness), "-o", str(binary)],
                 capture_output=True,
                 text=True,
-                timeout=60,
+                # 模块缓存指向空的临时目录，每次都要从头构建系统框架的缓存：
+                # 新版 SDK 上实测约 63 秒，原来的 60 秒上限会被它单独吃满。
+                timeout=300,
                 env=environment,
             )
             self.assertEqual(

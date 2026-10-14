@@ -61,13 +61,13 @@ struct RangeBoundary: Codable, Equatable {
 }
 
 enum PeerLoadStage: String {
-    case configuration = "配置"
-    case read = "读取"
+    case configuration = "配置" // l10n-ignore
+    case read = "读取" // l10n-ignore
     case json = "JSON"
-    case timestamp = "时间戳"
-    case usage = "用量结构"
-    case dashboard = "面板数据"
-    case rangeBounds = "时间范围"
+    case timestamp = "时间戳" // l10n-ignore
+    case usage = "用量结构" // l10n-ignore
+    case dashboard = "面板数据" // l10n-ignore
+    case rangeBounds = "时间范围" // l10n-ignore
 }
 
 struct PeerLoadIssue: Identifiable {
@@ -76,7 +76,7 @@ struct PeerLoadIssue: Identifiable {
     var stage: PeerLoadStage
     var detail: String
 
-    var summary: String { "\(file)：\(stage.rawValue)失败，\(detail)" }
+    var summary: String { L("%@：%@失败，%@", file, L(stage.rawValue), detail) }
 }
 
 struct PeerLoadReport {
@@ -257,7 +257,7 @@ final class SyncManager {
     }
 
     private static let providerQuotaIDs: Set<String> = [
-        "cursor", "grok_bot", "zed", "sub2api", "zai", "antigravity", "devin",
+        "cursor", "grok_bot", "zed", "sub2api", "zai", "antigravity", "devin", "minimax",
     ]
     private static let providerSettingKeys: Set<String> = [
         "sub2api_base_url", "zai_region", "zai_usage_scope",
@@ -316,7 +316,7 @@ final class SyncManager {
                 issues: [PeerLoadIssue(
                     file: Self.configPath.path,
                     stage: .configuration,
-                    detail: "同步配置缺失或无法解析"
+                    detail: L("同步配置缺失或无法解析")
                 )]
             )
         }
@@ -324,7 +324,7 @@ final class SyncManager {
         guard FileManager.default.fileExists(atPath: dir) else {
             return PeerLoadReport(
                 peers: [],
-                issues: [PeerLoadIssue(file: dir, stage: .read, detail: "同步目录不存在")]
+                issues: [PeerLoadIssue(file: dir, stage: .read, detail: L("同步目录不存在"))]
             )
         }
         var peers: [PeerDevice] = []
@@ -355,7 +355,7 @@ final class SyncManager {
             let raw: [String: Any]
             do {
                 guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    issues.append(PeerLoadIssue(file: file, stage: .json, detail: "顶层不是对象"))
+                    issues.append(PeerLoadIssue(file: file, stage: .json, detail: L("顶层不是对象")))
                     continue
                 }
                 raw = value
@@ -364,7 +364,7 @@ final class SyncManager {
                 continue
             }
             guard let ts = raw["_ts"] as? Int else {
-                issues.append(PeerLoadIssue(file: file, stage: .timestamp, detail: "缺少 _ts"))
+                issues.append(PeerLoadIssue(file: file, stage: .timestamp, detail: L("缺少 _ts")))
                 continue
             }
             var cleaned = raw
@@ -372,7 +372,7 @@ final class SyncManager {
             let usage: Usage
             do {
                 let cleanData = try JSONSerialization.data(withJSONObject: cleaned)
-                usage = try JSONDecoder().decode(Usage.self, from: cleanData)
+                usage = try Usage.decode(from: cleanData)
             } catch {
                 issues.append(PeerLoadIssue(file: file, stage: .usage, detail: error.localizedDescription))
                 continue
@@ -382,7 +382,7 @@ final class SyncManager {
                 do {
                     guard JSONSerialization.isValidJSONObject(rawDashboard) else {
                         throw NSError(domain: "TokeiPeer", code: 1,
-                                      userInfo: [NSLocalizedDescriptionKey: "不是有效 JSON 对象"])
+                                      userInfo: [NSLocalizedDescriptionKey: L("不是有效 JSON 对象")])
                     }
                     let dashboardData = try JSONSerialization.data(withJSONObject: rawDashboard)
                     dashboard = try JSONDecoder().decode(PeerDashboardSnapshot.self, from: dashboardData)
@@ -396,7 +396,7 @@ final class SyncManager {
                 do {
                     guard JSONSerialization.isValidJSONObject(rawBounds) else {
                         throw NSError(domain: "TokeiPeer", code: 2,
-                                      userInfo: [NSLocalizedDescriptionKey: "不是有效 JSON 对象"])
+                                      userInfo: [NSLocalizedDescriptionKey: L("不是有效 JSON 对象")])
                     }
                     let boundsData = try JSONSerialization.data(withJSONObject: rawBounds)
                     rangeBounds = try JSONDecoder().decode([String: RangeBoundary].self, from: boundsData)
@@ -424,11 +424,16 @@ final class SyncManager {
 
     // MARK: - Merge
 
-    static func merge(local: Usage, peers: [PeerDevice]) -> Usage {
+    static func merge(local: Usage, peers: [PeerDevice], now: Date = Date()) -> Usage {
         var u = local
         for peer in peers {
-            let pairs = rangePairs(for: peer)
+            let pairs = rangePairs(for: peer, now: now)
             mergeRanges(&u.claude.ranges, peer.usage.claude.ranges, pairs)
+            // Claude 额度只在登录了 Claude 的那台机器上读得到，token 合并之后再决定采用谁的。
+            let peerClaude = refreshingClaudeQuotaStaleness(peer.usage.claude, now: now)
+            if shouldReplaceClaudeQuota(current: u.claude, candidate: peerClaude) {
+                adoptClaudeQuota(&u.claude, from: peerClaude)
+            }
             mergeRanges(&u.codex.ranges, peer.usage.codex.ranges, pairs)
             if let localReserve = u.codex.reserveRanges,
                let peerReserve = peer.usage.codex.reserveRanges {
@@ -454,6 +459,8 @@ final class SyncManager {
             u.qoder.model = mergeModelName(u.qoder.model, peer.usage.qoder.model)
             mergeRanges(&u.qodercli.ranges, peer.usage.qodercli.ranges, pairs)
             u.qodercli.model = mergeModelName(u.qodercli.model, peer.usage.qodercli.model)
+            mergeRanges(&u.qodercliCN.ranges, peer.usage.qodercliCN.ranges, pairs)
+            u.qodercliCN.model = mergeModelName(u.qodercliCN.model, peer.usage.qodercliCN.model)
             mergeRanges(&u.hermes.ranges, peer.usage.hermes.ranges, pairs)
             mergeRanges(&u.zcode.ranges, peer.usage.zcode.ranges, pairs)
             mergeRanges(&u.mimocode.ranges, peer.usage.mimocode.ranges, pairs)
@@ -470,6 +477,7 @@ final class SyncManager {
             mergeRanges(&u.musecode.ranges, peer.usage.musecode.ranges, pairs)
             mergeRanges(&u.cmdcode.ranges, peer.usage.cmdcode.ranges, pairs)
             mergeRanges(&u.devin.ranges, peer.usage.devin.ranges, pairs)
+            mergeRanges(&u.minimax.ranges, peer.usage.minimax.ranges, pairs)
         }
         return u
     }
@@ -491,6 +499,58 @@ final class SyncManager {
             return current.stale && !candidate.stale
         }
         return candidateUpdated > currentUpdated
+    }
+
+    /// Claude 额度 10 个字段是一组，只能整组取自同一个来源。
+    private static func claudeQuotaHasData(_ claude: ClaudeStat) -> Bool {
+        claude.q5 != nil || claude.q7 != nil || claude.qf != nil
+    }
+
+    private static func claudeQuotaIsStale(_ claude: ClaudeStat) -> Bool {
+        claude.q5_stale == true || claude.q7_stale == true || claude.qf_stale == true
+    }
+
+    private static func shouldReplaceClaudeQuota(
+        current: ClaudeStat,
+        candidate: ClaudeStat
+    ) -> Bool {
+        guard claudeQuotaHasData(candidate) else { return false }
+        guard claudeQuotaHasData(current) else { return true }
+
+        let currentUpdated = current.q_updated ?? 0
+        let candidateUpdated = candidate.q_updated ?? 0
+        if candidateUpdated == currentUpdated {
+            return claudeQuotaIsStale(current) && !claudeQuotaIsStale(candidate)
+        }
+        return candidateUpdated > currentUpdated
+    }
+
+    private static func adoptClaudeQuota(_ dst: inout ClaudeStat, from src: ClaudeStat) {
+        dst.q5 = src.q5; dst.q5_reset = src.q5_reset; dst.q5_stale = src.q5_stale
+        dst.q7 = src.q7; dst.q7_reset = src.q7_reset; dst.q7_stale = src.q7_stale
+        dst.qf = src.qf; dst.qf_reset = src.qf_reset; dst.qf_stale = src.qf_stale
+        dst.q_updated = src.q_updated
+    }
+
+    /// 与 usage.30s.py 的 `_CLAUDE_QUOTA_STALE_TTL` 保持一致。
+    static let claudeQuotaStaleTTL: TimeInterval = 1800
+
+    /// 同 usage.30s.py 的 `_claude_quota_with_freshness`：peer 快照里的过期标记是写入时算的，
+    /// 快照可能是几小时前写的，所以按「现在」重算。
+    /// 有值的窗口，数据超过 30 分钟、时间戳缺失或超前（时钟漂移）、或重置时刻已过，都算过期。
+    static func refreshingClaudeQuotaStaleness(_ claude: ClaudeStat, now: Date) -> ClaudeStat {
+        var out = claude
+        let nowSeconds = Int(now.timeIntervalSince1970)
+        let updated = claude.q_updated ?? 0
+        let age = nowSeconds - updated
+        let sourceStale = updated <= 0 || Double(age) > claudeQuotaStaleTTL || age < -300
+        func stale(_ value: Double?, _ reset: Int?) -> Bool {
+            value != nil && (sourceStale || (reset.map { $0 <= nowSeconds } ?? false))
+        }
+        out.q5_stale = stale(claude.q5, claude.q5_reset)
+        out.q7_stale = stale(claude.q7, claude.q7_reset)
+        out.qf_stale = stale(claude.qf, claude.qf_reset)
+        return out
     }
 
     private static func rangePairs(for peer: PeerDevice, now: Date = Date()) -> [(src: RangeKey, dst: RangeKey)] {
@@ -552,6 +612,7 @@ final class SyncManager {
             d.cost += s.cost; d.sessions += s.sessions
             d.hit = hitRate(cached: d.cr, input: d.in, cacheWrite: d.cw)
             mergeClaudeModels(&d.models, s.models)
+            d.perf = PerfStat.merged(d.perf, s.perf)
             dst.set(pair.dst, d)
         }
     }
@@ -563,6 +624,7 @@ final class SyncManager {
             d.reason += s.reason; d.cost += s.cost; d.sessions += s.sessions
             d.hit = hitRate(cached: d.cached, input: d.in)
             mergeTokenModels(&d.models, s.models)
+            d.perf = PerfStat.merged(d.perf, s.perf)
             dst.set(pair.dst, d)
         }
     }
@@ -574,6 +636,7 @@ final class SyncManager {
             d.thoughts += s.thoughts; d.cost += s.cost; d.sessions += s.sessions
             d.hit = hitRate(cached: d.cached, input: d.in)
             mergeGeminiModels(&d.models, s.models)
+            d.perf = PerfStat.merged(d.perf, s.perf)
             dst.set(pair.dst, d)
         }
     }
@@ -608,6 +671,7 @@ final class SyncManager {
             let ctxUsed = d.ctx_used ?? 0
             let ctxWindow = d.ctx_window ?? 0
             d.ctx = ctxWindow > 0 ? Double(ctxUsed) / Double(ctxWindow) * 100 : 0
+            d.perf = PerfStat.merged(d.perf, s.perf)
             dst.set(pair.dst, d)
         }
     }
@@ -627,6 +691,7 @@ final class SyncManager {
             d.hit = inputTotal > 0 ? Double(d.cr) / Double(inputTotal) * 100 : 0
             mergeTokenModels(&d.models, s.models)
             d.ctx = weightedAverage(d.ctx, originalSessions, s.ctx, s.sessions)
+            d.perf = PerfStat.merged(d.perf, s.perf)
             dst.set(pair.dst, d)
         }
     }
@@ -651,6 +716,7 @@ final class SyncManager {
             d.reason += s.reason; d.cost += s.cost; d.sessions += s.sessions
             d.hit = hitRate(cached: d.cr, input: d.in, cacheWrite: d.cw)
             mergeTokenModels(&d.models, s.models)
+            d.perf = PerfStat.merged(d.perf, s.perf)
             dst.set(pair.dst, d)
         }
     }
@@ -663,6 +729,7 @@ final class SyncManager {
             d.reason += s.reason; d.cost += s.cost; d.sessions += s.sessions
             d.hit = hitRate(cached: d.cr, input: d.in, cacheWrite: d.cw)
             mergeTokenModels(&d.models, s.models)
+            d.perf = PerfStat.merged(d.perf, s.perf)
             dst.set(pair.dst, d)
         }
     }
@@ -675,6 +742,7 @@ final class SyncManager {
             d.cost_cny = (d.cost_cny ?? 0) + (s.cost_cny ?? 0)
             d.hit = hitRate(cached: d.cr, input: d.in, cacheWrite: d.cw)
             mergeTokenModels(&d.models, s.models)
+            d.perf = PerfStat.merged(d.perf, s.perf)
             dst.set(pair.dst, d)
         }
     }
@@ -748,7 +816,14 @@ final class SyncManager {
                 dst[idx].cost += m.cost
                 dst[idx].credits += m.credits
                 dst[idx].cost_cny = (dst[idx].cost_cny ?? 0) + (m.cost_cny ?? 0)
-                if dst[idx].name == "未知" && m.name != "未知" {
+                // 本机这条没带单价（旧版采集器）而对端带了，就用对端的，免得合并后单价消失
+                if dst[idx].pin == 0 && dst[idx].pout == 0 && (m.pin > 0 || m.pout > 0) {
+                    dst[idx].pin = m.pin
+                    dst[idx].pout = m.pout
+                    dst[idx].pcr = m.pcr
+                    dst[idx].pref = m.pref
+                }
+                if dst[idx].name == "未知" && m.name != "未知" { // l10n-ignore
                     dst[idx].name = m.name
                 }
             } else {
@@ -1156,11 +1231,11 @@ final class SyncManager {
     func synchronize(snapshotCommand: SyncCommand,
                      completion: @escaping (GitSyncResult) -> Void) {
         guard let cfg = config else {
-            completion(GitSyncResult(code: .invalidConfiguration, output: "同步配置不可用"))
+            completion(GitSyncResult(code: .invalidConfiguration, output: L("同步配置不可用")))
             return
         }
         guard let deviceID = Self.validDeviceID(cfg.device_id) else {
-            completion(GitSyncResult(code: .invalidConfiguration, output: "设备名不合法"))
+            completion(GitSyncResult(code: .invalidConfiguration, output: L("设备名不合法")))
             return
         }
         let dir = Self.resolvedSyncDir(cfg)
@@ -1170,7 +1245,7 @@ final class SyncManager {
               isDirectory.boolValue else {
             completion(GitSyncResult(
                 code: .invalidRepository,
-                output: "同步目录不是普通 Git 仓库：\(dir)"
+                output: L("同步目录不是普通 Git 仓库：%@", dir)
             ))
             return
         }
@@ -1255,9 +1330,9 @@ final class SyncManager {
             let code = Self.resultCode(for: proc.terminationStatus)
             let fallback: String
             switch code {
-            case .success: fallback = "GitHub 已同步"
-            case .busy: fallback = "另一同步任务正在运行"
-            default: fallback = "同步失败，退出码 \(proc.terminationStatus)"
+            case .success: fallback = L("GitHub 已同步")
+            case .busy: fallback = L("另一同步任务正在运行")
+            default: fallback = L("同步失败，退出码 %@", proc.terminationStatus)
             }
             let result = GitSyncResult(
                 code: code,

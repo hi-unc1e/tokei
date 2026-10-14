@@ -307,11 +307,13 @@ class DashboardCacheTests(unittest.TestCase):
                      side_effect=AssertionError("cache should use one encoded write"),
                  ):
                 USAGE._save_scan_cache(cache)
-
-            stored = json.loads(cache_path.read_text(encoding="utf-8"))
+                stored, _ = USAGE._read_scan_cache_file()
+                leftovers = [p.name for p in Path(USAGE._scan_shard_dir()).iterdir()
+                             if p.name.startswith(".")]
 
         self.assertEqual(stored["v"], USAGE._SCAN_CACHE_VERSION)
         self.assertEqual(len(stored["sentinel"]), 100_000)
+        self.assertEqual(leftovers, [], "临时文件都应已原子替换或清理")
 
 
 if __name__ == "__main__":

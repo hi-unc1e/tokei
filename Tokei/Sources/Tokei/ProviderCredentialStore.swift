@@ -6,6 +6,7 @@ import Security
 enum ProviderSecret: String {
     case sub2api
     case zai
+    case minimax
 }
 
 enum ProviderCredentialStore {
@@ -46,7 +47,7 @@ enum ProviderCredentialStore {
 
 #if TOKEI_PROVIDER_CREDENTIAL_STORE_TEST
     static func purgeTestItems() {
-        for provider in [ProviderSecret.sub2api, .zai] {
+        for provider in [ProviderSecret.sub2api, .zai, .minimax] {
             _ = SecItemDelete(baseQuery(for: provider, service: service) as CFDictionary)
         }
     }

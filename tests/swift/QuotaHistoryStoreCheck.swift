@@ -7,6 +7,8 @@ private enum TestFailure: Error {
 @main
 struct QuotaHistoryStoreCheck {
     static func main() throws {
+        // 断言的是中文输出，不能随跑测试那台机器的系统语言变化。
+        L10n.forcedLanguage = .zh
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tokei-quota-history-\(UUID().uuidString)")
         let fileURL = directory.appendingPathComponent("quota_history.json")
@@ -99,6 +101,7 @@ struct QuotaHistoryStoreCheck {
         try expect(reloaded.points.count == 1, "points outside retention should be pruned")
 
         try checkProjection()
+        try checkDailyConsumption()
         print("quota history store checks passed")
     }
 
@@ -160,6 +163,52 @@ struct QuotaHistoryStoreCheck {
             fableMarker?.activity.map(\.model) == ["Claude Fable"],
             "Fable markers should only include Fable activity"
         )
+    }
+
+    /// 每天用了多少额度（issue #85）。
+    private static func checkDailyConsumption() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let day = 1_800_000_000 - 1_800_000_000 % 86_400
+        let hour = 3600
+        func codex(_ offset: Int, _ remaining: Double) -> QuotaHistoryPoint {
+            QuotaHistoryPoint(timestamp: day + offset, codexWeekRemaining: remaining)
+        }
+        let points = [
+            // 第一天：从 00:30 采到 23:30，82 → 75，用掉 7 个点
+            codex(hour / 2, 82), codex(10 * hour, 80), codex(23 * hour + hour / 2, 75),
+            // 第二天：75 → 72，回满到 97，再用到 90；中间 90 → 91 的小回升不算回满也不抵扣
+            codex(24 * hour + hour / 2, 75), codex(30 * hour, 72), codex(31 * hour, 97),
+            codex(40 * hour, 90), codex(41 * hour, 91), codex(47 * hour + hour / 2, 88),
+            // 第三天：只在下午有采样，前一晚到中午的下降都记在这天，标「约」
+            codex(62 * hour, 85),
+        ]
+        let rows = QuotaHistoryProjection.dailyConsumption(
+            from: points, tool: .codex, calendar: calendar)
+        try expect(rows.count == 3, "one row per calendar day: \(rows.count)")
+        try expect(rows[2].consumed == 7 && rows[2].refills == 0 && rows[2].isComplete,
+                   "day one uses 7 points and is fully sampled")
+        try expect(rows[1].consumed == 3 + 7 + 3, "day two: drops add up, rises never offset them")
+        try expect(rows[1].refills == 1, "only the jump to 97 is a refill, not 90 -> 91")
+        try expect(rows[1].isComplete, "day two is sampled at both ends")
+        try expect(rows[0].consumed == 3 && !rows[0].isComplete,
+                   "a drop across an overnight gap makes the receiving day approximate")
+
+        // 夜里没用、读数过期不留快照：空档里额度没动，两天都说得准
+        let quietNight = QuotaHistoryProjection.dailyConsumption(
+            from: [codex(hour / 2, 60), codex(18 * hour, 55), codex(34 * hour, 55),
+                   codex(40 * hour, 50)],
+            tool: .codex, calendar: calendar)
+        try expect(quietNight.count == 2 && quietNight.allSatisfy(\.isComplete),
+                   "an overnight gap without any drop is not approximate")
+        try expect(quietNight[0].consumed == 5 && quietNight[1].consumed == 5,
+                   "each day keeps its own drops")
+
+        // 最早那天之前没有记录，开头缺采样时说不准
+        let partialStart = QuotaHistoryProjection.dailyConsumption(
+            from: [codex(12 * hour, 60), codex(20 * hour, 55)], tool: .codex, calendar: calendar)
+        try expect(partialStart.count == 1 && !partialStart[0].isComplete,
+                   "the oldest day starting late is approximate")
     }
 
     private static func historyPoint(

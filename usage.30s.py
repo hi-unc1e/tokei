@@ -19,6 +19,8 @@
 #   Pi:          ~/.pi/agent/sessions/**/*.jsonl + ~/.omp/agent/sessions/**/*.jsonl
 #   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
 #   WorkBuddy AI:~/.workbuddy-ai/projects/**/*.jsonl (国际版,同结构独立统计)
+#   Qoder CLI:   ~/.qoder/projects/**/*.jsonl (Agent transcript,按 request_id 跨文件去重)
+#   Qoder CN:    ~/.qoder-cn/projects/**/*.jsonl (国内版,同结构独立统计 qodercli_cn)
 #   CodeBuddy:   ~/.codebuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
 #   Grok Bot:    ~/Library/Application Support/Grok Bot/sand-client-persistence/*.blob
 #                (本地会话活动；当前快照不含 Token / 模型 / 成本)
@@ -49,6 +51,45 @@ from pathlib import Path
 HOME = os.path.expanduser("~")
 APPDATA = os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming")
 LOCALAPPDATA = os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
+_IS_WINDOWS = os.name == "nt"
+# 托盘应用（没有控制台）启动采集时，Windows 默认会给每个子进程弹一个命令行窗口。
+_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if _IS_WINDOWS else {}
+_WINDOWS_ABS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def _is_abs_project_path(path):
+    r"""会话记下的工作目录是不是绝对路径：POSIX 的 /…，Windows 的 C:\… 和 \\server\share。"""
+    return isinstance(path, str) and (path.startswith("/") or bool(_WINDOWS_ABS_PATH.match(path)))
+
+
+def _lock_file(fd):
+    """独占锁住锁文件：macOS / Linux 用 flock，Windows 用 msvcrt.locking。
+
+    msvcrt 拿不到锁时自己每秒重试、10 次后报 OSError；这里再多等几轮，仍拿不到就抛给
+    调用方按「没加锁」处理，不至于把整轮采集卡死。
+    """
+    if _IS_WINDOWS:
+        import msvcrt
+        for _ in range(6):
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                continue
+        raise OSError("timed out waiting for lock")
+    import fcntl
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _unlock_file(fd):
+    if _IS_WINDOWS:
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+    fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def _expand_path(path):
@@ -180,7 +221,11 @@ DEVIN_CLI_DB_PATHS = _path_candidates(
     os.path.join(HOME, "Library", "Application Support", "devin", "cli", "sessions.db"),
     os.path.join(APPDATA, "devin", "cli", "sessions.db"),
     os.path.join(LOCALAPPDATA, "devin", "cli", "sessions.db"))
-OPENCLAW_DB = os.path.join(OPENCLAW_STATE_DIR, "tasks", "runs.sqlite")
+# MiniMax Code 桌面端的本地运行时库；模型名在同级的 observability/logs 里。
+MINIMAX_DB_PATHS = _path_candidates(
+    "TOKEI_MINIMAX_DB",
+    os.path.join(HOME, ".minimax", "v2", "sqlite", "runtime-state.sqlite"))
+OPENCLAW_DB =os.path.join(OPENCLAW_STATE_DIR, "tasks", "runs.sqlite")
 OPENCLAW_STATE_DB = os.path.join(OPENCLAW_STATE_DIR, "state", "openclaw.sqlite")
 OPENCLAW_AGENTS = os.path.join(OPENCLAW_STATE_DIR, "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
@@ -220,7 +265,7 @@ def _writable_path(name):
         return user
     base = os.path.join(BASE_DIR, name)
     if os.path.isfile(base):
-        if ".app/" in BASE_DIR:
+        if ".app/" in BASE_DIR or _IS_WINDOWS:
             os.makedirs(_USER_DIR, exist_ok=True)
             import shutil; shutil.copy2(base, user)
             return user
@@ -247,6 +292,12 @@ ANTIGRAVITY_SCAN_CACHE = _writable_path("antigravity_scan_cache.json")
 _DEFAULT_PRICES = {
     "anthropic/claude-fable-5.1":   {"in": 10.0,  "out": 50.0, "cache_read": 0.25,   "cache_write": 12.5, "write1h": 20.0},
     "anthropic/claude-sonnet-5":    {"in": 2.0,   "out": 10.0, "cache_read": 0.2,    "cache_write": 2.5},
+    # OpenRouter 目录还没收录 Sonnet 5.5；官方价与 Sonnet 5 相同。收录后以目录为准。
+    "anthropic/claude-sonnet-5.5":  {"in": 2.0,   "out": 10.0, "cache_read": 0.2,    "cache_write": 2.5},
+    # Anthropic 官方价（2026-10-08 核对）。新一代刚发布时 OpenRouter 目录常常还没收录，
+    # 查不到就会沿用上一代的价——Haiku 5.5 会被按 Haiku 4.5 计成 10 倍。收录后以目录为准。
+    "anthropic/claude-opus-5.5":    {"in": 4.0,   "out": 20.0, "cache_read": 0.2,    "cache_write": 5.0},
+    "anthropic/claude-haiku-5.5":   {"in": 0.1,   "out": 0.5,  "cache_read": 0.01,   "cache_write": 0.125},
     "anthropic/claude-opus-4.8":     {"in": 5.0,   "out": 25.0, "cache_read": 0.5,    "cache_write": 6.25},
     "anthropic/claude-sonnet-4.6":   {"in": 3.0,   "out": 15.0, "cache_read": 0.3,    "cache_write": 3.75},
     "anthropic/claude-haiku-4.5":    {"in": 1.0,   "out": 5.0,  "cache_read": 0.1,    "cache_write": 1.25},
@@ -256,6 +307,7 @@ _DEFAULT_PRICES = {
     "openai/gpt-5.5":                {"in": 5.0,   "out": 30.0, "cache_read": 0.5,    "cache_write": 0.0},
     "openai/gpt-6-astra":            {"in": 10.0,  "out": 50.0, "cache_read": 1.0,    "cache_write": 12.5},
     "openai/gpt-6-sol":              {"in": 2.0,   "out": 10.0, "cache_read": 0.2,    "cache_write": 2.5},
+    "openai/gpt-6.1-sol":            {"in": 2.0,   "out": 10.0, "cache_read": 0.1,    "cache_write": 2.5},
     "openai/gpt-6-luna":             {"in": 0.1,   "out": 0.5,  "cache_read": 0.01,   "cache_write": 0.125},
     "qwen/qwen3.8-max":              {"in": 2.0,   "out": 6.0,  "cache_read": 0.25,   "cache_write": 2.5},
     "qwen/qwen3.7-max":              {"in": 1.25,  "out": 3.75, "cache_read": 0.25,   "cache_write": 1.5625},
@@ -265,6 +317,11 @@ _DEFAULT_PRICES = {
     "x-ai/grok-4.6":                 {"in": 2.0,   "out": 6.0,  "cache_read": 0.5,    "cache_write": 0.0},
     "x-ai/grok-4.5":                 {"in": 2.0,   "out": 6.0,  "cache_read": 0.3,    "cache_write": 0.0},
     "tencent/hy3":                   {"in": 0.14,  "out": 0.58, "cache_read": 0.035,  "cache_write": 0.0},
+    # 阶跃星辰还没有官方价目表，OpenRouter 也未上架；先用 Vercel AI Gateway /
+    # EmpirioLabs 的公开价（2026-09-30 核对）。OpenRouter 一上架就以它为准。
+    "stepfun/step-5-preview":        {"in": 1.0,   "out": 2.7,  "cache_read": 0.05,   "cache_write": 0.0},
+    # MiniMax 官方按量价（platform.minimax.io，2026-09-30 核对）；OpenRouter 未收录 highspeed。
+    "minimax/minimax-m2.7-highspeed": {"in": 0.6,  "out": 2.4,  "cache_read": 0.06,   "cache_write": 0.375},
     "tencent/hy3-preview":           {"in": 0.063, "out": 0.21, "cache_read": 0.021,  "cache_write": 0.0},
 }
 
@@ -348,10 +405,10 @@ _PRICING_DB = _load_json(PRICING_FILE, {}).get("models", {})
 # 已安装版本会保留用户自己的 pricing_overrides.json。关键官方修正也随脚本内置，
 # 这样升级后立即生效；用户仍可覆盖单价，已确认的官方别名保持固定映射。
 _BUILTIN_OVERRIDE_MODELS = {
-    # OpenAI Standard API rates, verified 2026-09-23:
+    # OpenAI Standard API rates, verified 2026-09-23 (gpt-6.1-sol 2026-09-30):
     # https://developers.openai.com/api/docs/pricing
     **{model: dict(_DEFAULT_PRICES[model]) for model in (
-        "openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6-luna",
+        "openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6.1-sol", "openai/gpt-6-luna",
     )},
     "openai/gpt-5.6-sol": {
         "in": 4.0, "out": 20.0, "cache_read": 0.4, "cache_write": 5.0,
@@ -382,6 +439,13 @@ _OVERRIDES = _load_json(OVERRIDES_FILE, {})
 _OV_MODELS, _OV_ALIASES = _merge_pricing_overrides(_OVERRIDES)
 
 
+# 按单次请求提示长度分档的 Claude 模型：(提示 token 上限, 超出后整次请求的倍数)。
+# 提示 = 输入 + 缓存读 + 缓存写。Haiku 5.5 超过 100K 后是 $0.50 / $2.50，缓存读写同比例。
+_CLAUDE_LONG_PROMPT_TIERS = {
+    "anthropic/claude-haiku-5.5": (100_000, 5.0),
+}
+
+
 def _effective_pricing_map(catalog=None):
     fields = ("in", "out", "cache_read", "cache_write", "write1h")
     catalog = catalog if isinstance(catalog, dict) else _PRICING_DB
@@ -392,6 +456,10 @@ def _effective_pricing_map(catalog=None):
         value.update(catalog.get(model, {}))
         value.update(_OV_MODELS.get(model, {}))
         result[model] = {field: value.get(field, 0.0) for field in fields}
+        # 分档规则也算价格的一部分：规则变了，缓存里这个模型的成本要跟着重算。
+        tier = _CLAUDE_LONG_PROMPT_TIERS.get(model)
+        if tier:
+            result[model]["long_prompt"] = list(tier)
     return result
 
 
@@ -444,11 +512,86 @@ _FAMILY = [
 ]
 
 
+_CATALOG_INDEX = None
+# 版本线：前缀 + 主.次版本 + 档位后缀。minimax-m3.1-flash → ("minimax-m", (3, 1), "-flash")
+_MODEL_LINE_RE = re.compile(r"^(.*?)(\d+)(?:\.(\d+))?((?:-[a-z][a-z0-9.]*)*)$")
+_UNSTABLE_SUFFIX_RE = re.compile(r"(?:-(?:preview|latest|exp|\d{8}|\d{4}-\d{2}-\d{2}|\d{4}))+$")
+
+
+def _model_line(name):
+    """(前缀, 版本, 档位, 是否正式版)。preview / 日期这类后缀不算档位。"""
+    base = _UNSTABLE_SUFFIX_RE.sub("", name)
+    match = _MODEL_LINE_RE.match(base)
+    if not match:
+        return None
+    version = (int(match.group(2)), int(match.group(3) or 0))
+    return match.group(1), version, match.group(4), base == name
+
+
+def _catalog_index():
+    """价目表索引：按名字找条目、按版本线找上一个版本都用它。
+
+    OpenRouter 自己的路由占位（openrouter/auto，价格 -1）和 :batch 之类的变体不参与。
+    """
+    global _CATALOG_INDEX
+    if _CATALOG_INDEX is None:
+        suffix, lines = {}, {}
+        for catalog in (_DEFAULT_PRICES, _PRICING_DB, _OV_MODELS):
+            for model_id, price in catalog.items():
+                if ("/" not in model_id or ":" in model_id
+                        or model_id.startswith("openrouter/") or not isinstance(price, dict)):
+                    continue
+                if (price.get("in") or 0) < 0 or (price.get("out") or 0) < 0:
+                    continue
+                provider, name = model_id.lower().rsplit("/", 1)
+                suffix.setdefault(name, set()).add(model_id)
+                line = _model_line(name)
+                if line:
+                    prefix, version, tier, stable = line
+                    lines.setdefault(prefix, set()).add((provider, version, tier, stable, model_id))
+        _CATALOG_INDEX = {"suffix": suffix, "lines": lines}
+    return _CATALOG_INDEX
+
+
+def _catalog_id_for_bare_name(name):
+    """不带厂商前缀的模型名（hy4-preview、step-5-preview）到价目表里找同名条目。
+    只认唯一匹配：两个厂商都有同名模型时说不清是哪家，宁可不认。"""
+    matches = _catalog_index()["suffix"].get(name)
+    return next(iter(matches)) if matches and len(matches) == 1 else None
+
+
+def _predecessor_pricing_id(normalized):
+    """价目表里没有这个模型时，沿用同一版本线上一个版本的价（用户的规则）。
+
+    minimax-m3.1-flash-preview → minimax-m3；gpt-6.2-sol → gpt-6.1-sol；
+    deepseek-v4.2-flash → deepseek-v4.1-flash。先找同档位（-flash / -sol）里版本不高于
+    它的最近一个，没有再找同版本线的基础款；同版本时正式版优先于 preview。
+    不带厂商前缀的名字只在所有候选都来自同一家时才认。
+    """
+    if not normalized:
+        return None
+    provider, _, name = normalized.lower().rpartition("/")
+    line = _model_line(name)
+    if not line:
+        return None
+    prefix, version, tier, _stable = line
+    candidates = [c for c in _catalog_index()["lines"].get(prefix, ())
+                  if c[1] <= version and (not provider or c[0] == provider)]
+    if not provider and len({c[0] for c in candidates}) > 1:
+        return None
+    for wanted in dict.fromkeys((tier, "")):
+        same_tier = [c for c in candidates if c[2] == wanted]
+        if same_tier:
+            return max(same_tier, key=lambda c: (c[1], c[3]))[4]
+    return None
+
+
 def _normalize(model: str):
     """本地 model 名 → OpenRouter canonical id。免费档去 :free 按基础价;preview 后缀保留。"""
     m = (model or "").strip().lower()
     if not m or m == "<synthetic>":
         return None
+    m = re.sub(r"^custom[\w-]*:", "", m)             # WorkBuddy 自配模型：custom-local:step-5-preview
     m = re.sub(r"\s+", "-", m)
     m = re.sub(r"[:\-]free$", "", m)                  # 免费档按基础价
     seg = m.rsplit("/", 1)[-1]
@@ -457,6 +600,9 @@ def _normalize(model: str):
     if "/" in m:
         return m                                      # 已是 OpenRouter 格式
     if m.startswith("claude"):
+        # 日期快照与 -latest 同基础版一个价：claude-opus-5-5-20260921 → claude-opus-5-5。
+        # 不剥的话下一行会把「5-20260921」当成版本号，最后按家族兜底成别的型号计价。
+        m = re.sub(r"-(?:\d{8}|latest)$", "", m)
         m = re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", m)    # claude-opus-4-8 → claude-opus-4.8
         return "anthropic/" + m
     if re.match(r"(gpt|o\d|chatgpt)", m):
@@ -475,11 +621,14 @@ def _normalize(model: str):
         return "meta/" + m
     if m.startswith("mimo"):
         return "xiaomi/" + m
+    if m.startswith("minimax"):
+        return "minimax/" + m
     if m == "hy3":
         return "tencent/hy3"
     if m in ("hy3-preview", "hy3 preview"):
         return "tencent/hy3-preview"
-    return m
+    # 其余不带厂商前缀的，按名字到价目表（OpenRouter 为主）里找
+    return _catalog_id_for_bare_name(m) or m
 
 
 def _override_alias(model: str):
@@ -498,6 +647,9 @@ def _resolve_id(model: str):
     norm = _normalize(model)
     if norm and (norm in _OV_MODELS or norm in _PRICING_DB or norm in _DEFAULT_PRICES):
         return norm
+    predecessor = _predecessor_pricing_id(norm)       # 沿用同一版本线上一个版本
+    if predecessor:
+        return predecessor
     low = s.lower()
     if "gemini" in low:                               # gemini 版本繁多,按 pro/flash 粗分回退
         return "google/gemini-3.1-pro-preview" if "pro" in low else "google/gemini-3.5-flash"
@@ -558,9 +710,24 @@ def _has_known_price(model: str):
     return _pricing_id(model) is not None
 
 
+def _in_catalog(model_id):
+    return bool(model_id) and (model_id in _OV_MODELS or model_id in _PRICING_DB
+                               or model_id in _DEFAULT_PRICES)
+
+
 def _pricing_id(model: str):
+    alias = _override_alias((model or "").strip())
+    if _in_catalog(alias):
+        return alias
+    normalized = _normalize(model)
+    if _in_catalog(normalized):
+        return normalized
+    # 价目表里没有：先沿用同一版本线上一个版本的价，再退到按家族的粗略代表
+    predecessor = _predecessor_pricing_id(normalized)
+    if predecessor:
+        return predecessor
     canonical = _known_id_or_raw(model)
-    if canonical and (canonical in _OV_MODELS or canonical in _PRICING_DB or canonical in _DEFAULT_PRICES):
+    if _in_catalog(canonical):
         return canonical
     # ZCode currently reports GLM-5.2, whose public price is not listed yet.
     # Use the documented GLM-5.1 equivalent until the pricing feed adds 5.2.
@@ -661,10 +828,17 @@ def nice_model(m: str) -> str:
         return "未知"
     import re
     s = m.lower()
-    for key, disp in (("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")):
+    for key, disp in (("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"),
+                      ("haiku", "Haiku")):
         if key in s:
-            mt = re.search(r"(\d+)-(\d+)", s)
-            return f"{disp} {mt.group(1)}.{mt.group(2)}" if mt else disp
+            # 新写法版本在家族名之后（opus-5-5 / opus-5.5 / opus-5，可能再带日期），
+            # 老写法在之前（claude-3-5-sonnet）。版本段最多两位，日期不会被当成版本。
+            mt = (re.search(rf"{key}[-_ ]?(\d{{1,2}})(?:[-.](\d{{1,2}}))?(?!\d)", s)
+                  or re.search(rf"(\d{{1,2}})(?:[-.](\d{{1,2}}))?[-_ ]{key}", s))
+            if not mt:
+                return disp
+            major, minor = mt.group(1), mt.group(2)
+            return f"{disp} {major}.{minor}" if minor else f"{disp} {major}"
     if "gpt" in s:
         # Luna Reserve 的内部标识,展示为 Luna Reserve 而不是裸 GPT。
         if re.search(r"(?:^|[-_/ ])reserve(?:$|[-_/ ])", s):
@@ -686,7 +860,13 @@ def nice_model(m: str) -> str:
             return "MiMo"
         head = "MiMo-V" + parts[0] if parts[0][0].isdigit() else "MiMo-" + parts[0]
         return "-".join([head] + [part.capitalize() for part in parts[1:]])
-    name = re.sub(r"[-:](free|preview|latest)$", "", m.split("/")[-1]).replace("-", " ")
+    if s.split("/")[-1].startswith("minimax"):
+        # minimax/minimax-m3 → MiniMax M3，MiniMax-M2.7-highspeed → MiniMax M2.7 Highspeed
+        rest = m.split("/")[-1][len("minimax"):]
+        parts = [part for part in re.split(r"[-\s]+", rest) if part]
+        return " ".join(["MiniMax"] + [part[:1].upper() + part[1:] for part in parts])
+    # 日志里有「Hy4 preview」这种空格写法，和 hy4-preview 一样去掉后缀，同一个模型只有一个名字
+    name = re.sub(r"[-: ](free|preview|latest)$", "", m.split("/")[-1], flags=re.I).replace("-", " ")
     return " ".join(w[:1].upper() + w[1:] if w[:1].isalpha() else w
                     for w in name.split())
 
@@ -829,6 +1009,7 @@ def _remove_codex_event_cache_dir():
 def _migrate_legacy_scan_cache():
     if (_SCAN_CACHE_FILE != _DEFAULT_SCAN_CACHE_FILE
             or os.path.exists(_SCAN_CACHE_FILE)
+            or os.path.exists(os.path.join(_scan_shard_dir(), _SCAN_SHARD_MANIFEST))
             or not os.path.isfile(_LEGACY_SCAN_CACHE_FILE)):
         return
 
@@ -861,11 +1042,161 @@ def _migrate_legacy_scan_cache():
             pass
 
 
+# 扫描缓存按工具分片存（issue: 活跃使用时整份 16 MB 每 30 秒重写一次）。
+#
+#   scan_cache.d/manifest.json      清单：当前每个键用哪个分片文件，外加少量标量
+#   scan_cache.d/<键>.<内容哈希>.json 分片：文件名带内容哈希，内容没变就不重写
+#
+# 清单最后原子替换，是唯一的提交点：采集器随时可能被 App 超时杀掉，分片写到一半也
+# 不会出现「Codex 换了新值、定价记录还是旧的」这种跨键不一致（那会让成本被重复重算）。
+# 不再被引用的旧分片过了宽限期才删：只读入口（数据面板等）可能还拿着上一份清单在读。
+# 旧版单文件 scan_cache.json 仍能读，首次保存时迁过来；哪边更新以修改时间为准。
+_SCAN_CACHE_TRANSIENT_KEYS = frozenset({"_dirty", "_keys"})
+_SCAN_SHARD_MANIFEST = "manifest.json"
+_SCAN_SHARD_GRACE = 120
+# Claude、Codex 的缓存各有十几 MB，活跃时每轮都有一两个会话在变，整片重写一天要写几十 GB。
+# 超过这个体量的工具缓存再按条目（会话文件路径）拆成固定数量的桶，各桶照样按内容哈希命名，
+# 只重写变了的那几个桶；清单里这个工具记的是桶文件名列表。每个条目带着它在原字典里的位置，
+# 读回时按位置排好：有的去重逻辑「先遇到的留下」，顺序必须和拆桶前一样。新增条目追加在末尾，
+# 不挪动别的条目，只有删掉条目时后面的位置才整体前移（少见）。
+_SCAN_SHARD_BUCKET_BYTES = 512 * 1024
+_SCAN_SHARD_BUCKET_MIN_ENTRIES = 16
+_SCAN_SHARD_BUCKETS = 256
+
+
+def _scan_shard_dir():
+    return os.path.splitext(_SCAN_CACHE_FILE)[0] + ".d"
+
+
+def _scan_shard_name(key, payload):
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", key) or "_"
+    return f"{safe}.{hashlib.sha1(payload).hexdigest()[:16]}.json"
+
+
+def _scan_shard_payloads(key, value):
+    """[(文件名, 内容)]：小的整片一个文件，大的按条目拆桶。"""
+    def encode(data):
+        return json.dumps(data, separators=(",", ":")).encode("utf-8")
+    if isinstance(value, dict) and len(value) > _SCAN_SHARD_BUCKET_MIN_ENTRIES:
+        import zlib
+        buckets = {}
+        for position, (item_key, item) in enumerate(value.items()):
+            index = zlib.crc32(str(item_key).encode("utf-8")) % _SCAN_SHARD_BUCKETS
+            buckets.setdefault(index, []).append([position, item_key, item])
+        parts = [(index, encode({"items": bucket})) for index, bucket in sorted(buckets.items())]
+        if sum(len(payload) for _, payload in parts) > _SCAN_SHARD_BUCKET_BYTES:
+            return [(_scan_shard_name(f"{key}.b{index:03d}", payload), payload)
+                    for index, payload in parts]
+    payload = encode(value)
+    return [(_scan_shard_name(key, payload), payload)]
+
+
+def _read_scan_cache_file():
+    """返回 (缓存, 是否需要重写)。清单与旧版单文件都在时取修改时间更新的那个。"""
+    directory = _scan_shard_dir()
+    manifest_path = os.path.join(directory, _SCAN_SHARD_MANIFEST)
+    try:
+        manifest_mtime = os.path.getmtime(manifest_path)
+    except OSError:
+        manifest_mtime = None
+    try:
+        legacy_mtime = os.path.getmtime(_SCAN_CACHE_FILE)
+    except OSError:
+        legacy_mtime = None
+    if manifest_mtime is not None and (legacy_mtime is None or manifest_mtime >= legacy_mtime):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        cache = dict(manifest.get("meta") or {})
+        damaged = False
+        for key, names in (manifest.get("shards") or {}).items():
+            try:
+                if isinstance(names, list):
+                    items = []
+                    for name in names:
+                        with open(os.path.join(directory, name), "r", encoding="utf-8") as f:
+                            items.extend(json.load(f)["items"])
+                    items.sort(key=lambda item: item[0])
+                    value = {item_key: item for _, item_key, item in items}
+                else:
+                    with open(os.path.join(directory, names), "r", encoding="utf-8") as f:
+                        value = json.load(f)
+                cache[key] = value
+            except (OSError, ValueError, TypeError, KeyError, IndexError):
+                damaged = True  # 只丢这一个键（哪怕只坏了一个桶），下一轮重扫补上
+        return cache, damaged
+    with open(_SCAN_CACHE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f), True
+
+
+def _write_sharded_scan_cache(cache):
+    directory = _scan_shard_dir()
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
+    def write(path, payload):
+        fd, tmp = _tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=directory)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(payload)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    shards, meta = {}, {}
+    for key, value in cache.items():
+        if key in _SCAN_CACHE_TRANSIENT_KEYS:
+            continue
+        if not isinstance(value, (dict, list)):
+            meta[key] = value
+            continue
+        names = []
+        for name, payload in _scan_shard_payloads(key, value):
+            path = os.path.join(directory, name)
+            if not os.path.exists(path):
+                write(path, payload)
+            names.append(name)
+        shards[key] = names if len(names) > 1 else names[0]
+    write(os.path.join(directory, _SCAN_SHARD_MANIFEST),
+          json.dumps({"format": 1, "shards": shards, "meta": meta},
+                     separators=(",", ":")).encode("utf-8"))
+
+    keep = {_SCAN_SHARD_MANIFEST}
+    for names in shards.values():
+        keep.update(names if isinstance(names, list) else [names])
+    horizon = _time.time() - _SCAN_SHARD_GRACE
+    for entry in os.scandir(directory):
+        try:
+            if entry.name not in keep and entry.stat().st_mtime < horizon:
+                os.unlink(entry.path)
+        except OSError:
+            pass
+    try:
+        os.remove(_SCAN_CACHE_FILE)  # 已迁到分片
+    except OSError:
+        pass
+
+
+def _remove_scan_cache_files():
+    import shutil
+    try:
+        os.remove(_SCAN_CACHE_FILE)
+    except OSError:
+        pass
+    shutil.rmtree(_scan_shard_dir(), ignore_errors=True)
+
+
 def _load_scan_cache():
     _migrate_legacy_scan_cache()
     try:
-        with open(_SCAN_CACHE_FILE, "r") as f:
-            c = json.load(f)
+        c, rewrite = _read_scan_cache_file()
         version = c.get("v")
         if version not in (_SCAN_CACHE_VERSION, _SCAN_CACHE_MIGRATABLE_VERSION):
             _remove_codex_event_cache_dir()
@@ -874,7 +1205,7 @@ def _load_scan_cache():
             c["v"] = _SCAN_CACHE_VERSION
             c["_dirty"] = True
         else:
-            c["_dirty"] = False
+            c["_dirty"] = rewrite
         if c.get("_pricing_fingerprint") != _PRICING_FINGERPRINT:
             # Keep token caches intact. Claude/Codex reprice compact events in place;
             # other estimated-cost tools are recalculated from cached model totals.
@@ -916,28 +1247,9 @@ def _save_scan_cache(cache):
     if not dirty:
         return
     cache["v"] = _SCAN_CACHE_VERSION
-    tmp = None
     try:
-        directory = os.path.dirname(_SCAN_CACHE_FILE)
-        if directory:
-            os.makedirs(directory, mode=0o700, exist_ok=True)
-            try:
-                os.chmod(directory, 0o700)
-            except OSError:
-                pass
-        fd, tmp = _tempfile.mkstemp(prefix="_tokei_scan_cache.", suffix=".json",
-                                    dir=directory or None)
-        payload = json.dumps(cache, separators=(',', ':')).encode("utf-8")
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, _SCAN_CACHE_FILE)
+        _write_sharded_scan_cache(cache)
     except Exception:
-        if tmp:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
         pass
 
 
@@ -951,7 +1263,17 @@ _LEDGER_VERSION = 1
 _LEDGER_FIELDS = ("in", "out", "cr", "cw", "reason", "cached", "cost")
 
 
-_LEDGER_CACHE = {"data": None, "dirty": False}
+_LEDGER_CACHE = {"data": None, "dirty": False, "urgent": False}
+# 只有今天的数变了时，距上次落盘不到这么久就先不写：今天的日志都还在，晚几分钟入账不丢数，
+# 省得活跃时每 30 秒把整份账本（约 1 MB）重写一遍。历史天的变化、迁移照旧立刻写。
+_LEDGER_TODAY_FLUSH_INTERVAL = 600
+
+
+def _ledger_mark_dirty(days=None):
+    _LEDGER_CACHE["dirty"] = True
+    today = date.today().isoformat()
+    if days is None or any(day != today for day in days):
+        _LEDGER_CACHE["urgent"] = True
 
 
 def _load_ledger():
@@ -963,7 +1285,7 @@ def _load_ledger():
 
 def _load_ledger_from_disk():
     try:
-        with open(_LEDGER_FILE, "r") as f:
+        with open(_LEDGER_FILE, "r", encoding="utf-8") as f:
             ledger = json.load(f)
         if isinstance(ledger, dict) and ledger.get("v") == _LEDGER_VERSION:
             return ledger
@@ -976,7 +1298,7 @@ def _load_ledger_from_disk():
         sync_dir = (cfg.get("sync_dir") or "").strip()
         if device and sync_dir:
             snap_path = os.path.join(os.path.expanduser(sync_dir), f"{device}.json")
-            with open(snap_path, "r") as f:
+            with open(snap_path, "r", encoding="utf-8") as f:
                 backup = json.load(f).get("_ledger")
             if (isinstance(backup, dict) and backup.get("v") == _LEDGER_VERSION
                     and backup.get("tools")):
@@ -992,23 +1314,30 @@ def ledger_flush():
     每轮扫描只调一次,替代此前每工具一次的 15 轮锁+读+写(性能回归根因)。"""
     if not _LEDGER_CACHE["dirty"] or _LEDGER_CACHE["data"] is None:
         return
+    if not _LEDGER_CACHE.get("urgent"):
+        try:
+            if _time.time() - os.path.getmtime(_LEDGER_FILE) < _LEDGER_TODAY_FLUSH_INTERVAL:
+                return
+        except OSError:
+            pass
     lock_fd = None
     try:
-        import fcntl
         os.makedirs(os.path.dirname(_LEDGER_FILE), mode=0o700, exist_ok=True)
         lock_fd = os.open(f"{_LEDGER_FILE}.lock", os.O_CREAT | os.O_RDWR, 0o600)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        _lock_file(lock_fd)
     except OSError:
+        if lock_fd is not None:
+            os.close(lock_fd)
         lock_fd = None
     try:
         fresh = _load_ledger_from_disk()
         memo = _LEDGER_CACHE["data"]
-        memo_qodercli_schema = int(memo.get("qodercli_schema", 0) or 0)
-        fresh_qodercli_schema = int(fresh.get("qodercli_schema", 0) or 0)
-        if memo_qodercli_schema > fresh_qodercli_schema:
-            fresh.setdefault("tools", {})["qodercli"] = dict(
-                memo.get("tools", {}).get("qodercli", {}))
-            fresh["qodercli_schema"] = memo_qodercli_schema
+        for schema_key, schema_tool in _ledger_schema_keys():
+            memo_schema = int(memo.get(schema_key, 0) or 0)
+            if memo_schema > int(fresh.get(schema_key, 0) or 0):
+                fresh.setdefault("tools", {})[schema_tool] = dict(
+                    memo.get("tools", {}).get(schema_tool, {}))
+                fresh[schema_key] = memo_schema
         for tool, days in memo.get("tools", {}).items():
             stored = fresh["tools"].setdefault(tool, {})
             for dk, day in days.items():
@@ -1031,28 +1360,59 @@ def ledger_flush():
                 elif (kept is None
                         or _ledger_record_version(day) > _ledger_record_version(kept)
                         or (_ledger_record_version(day) == _ledger_record_version(kept)
-                            and _ledger_day_total(day) > _ledger_day_total(kept))):
+                            and _ledger_day_total(day) >= _ledger_day_total(kept))):
+                    # 总量相同也写：模型名规范化、补上速度字段这类更新要能落盘，
+                    # 不然对账每轮都认为这天变了
                     stored[dk] = day
         _save_ledger(fresh)
         _LEDGER_CACHE["data"] = fresh
         _LEDGER_CACHE["dirty"] = False
+        _LEDGER_CACHE["urgent"] = False
     finally:
         if lock_fd is not None:
             try:
-                import fcntl
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                _unlock_file(lock_fd)
             except OSError:
                 pass
             os.close(lock_fd)
 
 
+# _sources 保留多少天。
+#
+# 它记的是「当天这笔用量分别来自哪个会话」，只有当前扫描还能重新看到那些会话时
+# 才需要——用来在会话贡献变化时替换而不是重复累加。更老的日子永远不会再被扫到，
+# 明细只是每次 compute 都被递归遍历一遍再整份写回：实测 codex 的 _sources 占了
+# 整个账本 1.56 MB 里的 1.2 MB，对应 _ledger_values 的 9.7 万次调用。
+#
+# 收拢只丢来源明细，当天的合计值原样保留；万一某天又出现在实时扫描里，
+# _ledger_merge_sources 本来就有「没有 _sources 的老记录」那条 legacy 分支兜底。
+_LEDGER_SOURCES_RETAIN_DAYS = 45
+
+
+def _prune_ledger_sources(ledger, today=None):
+    """把过了保留期的天的 _sources 收拢掉，合计值不动。返回是否有改动。"""
+    today = today or date.today()
+    cutoff = (today - timedelta(days=_LEDGER_SOURCES_RETAIN_DAYS)).isoformat()
+    pruned = False
+    for days in (ledger.get("tools") or {}).values():
+        if not isinstance(days, dict):
+            continue
+        for day_key, day in days.items():
+            if day_key >= cutoff or not isinstance(day, dict):
+                continue
+            if day.pop("_sources", None) is not None:
+                pruned = True
+    return pruned
+
+
 def _save_ledger(ledger):
+    _prune_ledger_sources(ledger)
     tmp = None
     try:
         directory = os.path.dirname(_LEDGER_FILE)
         os.makedirs(directory, mode=0o700, exist_ok=True)
         fd, tmp = _tempfile.mkstemp(prefix=".ledger-", suffix=".json", dir=directory)
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(ledger, f, separators=(',', ':'))
         os.chmod(tmp, 0o600)
         os.replace(tmp, _LEDGER_FILE)
@@ -1069,6 +1429,62 @@ def _ledger_day_total(day):
     return sum(float(v) for k, v in day.items()
                if isinstance(v, (int, float)) and not isinstance(v, bool)
                and k not in ("cost", "cost_cny") and not k.startswith("_"))
+
+
+# 这些工具的旧版本遇到没有公开价的模型会按 Opus 兜底价估美元，账本里存着这些
+# 猜出来的成本（本机见过一个工具被多算四百美元）。迁一次，之后新记录本身就对。
+# 2：不带厂商前缀的模型名改按名字到价目表里查价，v1 清零的行有了价就按价补回。
+# 3：价目表里没有的沿用同一版本线上一个版本的价。
+_UNPRICED_COST_TOOLS = ("workbuddy", "workbuddy_ai", "pi", "qwencode")
+_UNPRICED_COST_SCHEMA = 3
+
+
+def _reprice_unpriced_costs(day, tool):
+    """账本某天（连同各来源）：没有公开价的模型成本清零，查得到价的按 token 重算。
+    WorkBuddy / Qwen Code 的成本本来就是 token × 单价，全部按现价重算——旧版按 Opus
+    猜的也一并改对；Pi 的日志可能自带真实成本，只补原来是 0 的。当天合计按差额调整。"""
+    models = day.get("models")
+    if isinstance(models, dict):
+        for name, usage in models.items():
+            if not isinstance(usage, dict):
+                continue
+            old = float(usage.get("cost", 0) or 0)
+            price_id = _pricing_id(name)
+            if not price_id:
+                new = 0.0
+            elif old > 0 and tool == "pi":
+                continue
+            else:
+                p = _raw_price(price_id)
+                out = usage.get("out", 0) + (usage.get("reason", 0) if tool == "qwencode" else 0)
+                new = (usage.get("in", 0) * p["in"] + out * p["out"]
+                       + usage.get("cr", 0) * p["cache_read"]
+                       + usage.get("cw", 0) * p["cache_write"]) / 1e6
+            if new != old:
+                usage["cost"] = new
+                day["cost"] = max(float(day.get("cost", 0) or 0) + new - old, 0.0)
+    for source in (day.get("_sources") or {}).values():
+        if isinstance(source, dict):
+            _reprice_unpriced_costs(source, tool)
+
+
+def _prepare_unpriced_cost_ledger(tool):
+    ledger = _load_ledger()
+    schema_key = f"{tool}_unpriced_schema"
+    if ledger.get(schema_key) == _UNPRICED_COST_SCHEMA:
+        return
+    for day in ledger.setdefault("tools", {}).get(tool, {}).values():
+        if isinstance(day, dict):
+            _reprice_unpriced_costs(day, tool)
+    ledger[schema_key] = _UNPRICED_COST_SCHEMA
+    _ledger_mark_dirty()
+
+
+def _ledger_schema_keys():
+    """需要整体迁移的工具账本：(schema 键, 工具)。迁移后的成本可能更低，
+    落盘时不能被磁盘上的旧高水位合并回去。"""
+    return ([(f"{tool}_schema", tool) for tool in _QODERCLI_DIRS]
+            + [(f"{tool}_unpriced_schema", tool) for tool in _UNPRICED_COST_TOOLS])
 
 
 def _ledger_record_version(day):
@@ -1103,6 +1519,36 @@ def _ledger_token_sum(day, tool=None):
     return tok
 
 
+def _ledger_perf_values(left, right, subtract=False):
+    """账本里的 perf：逐模型把 o/g/n 和 TTFT 直方图直接相加（或相减），
+    不走通用的逐键递归——每天每个来源都带一份直方图，递归是账本合并里最贵的一段。"""
+    left = left if isinstance(left, dict) else {}
+    right = right if isinstance(right, dict) else {}
+    sign = -1 if subtract else 1
+    result = {}
+    for model in left.keys() | right.keys():
+        a, b = left.get(model), right.get(model)
+        a = a if isinstance(a, dict) else {}
+        b = b if isinstance(b, dict) else {}
+        stats = {}
+        for field in ("o", "n"):
+            value = int(a.get(field, 0) or 0) + sign * int(b.get(field, 0) or 0)
+            stats[field] = max(value, 0)
+        stats["g"] = max(round(float(a.get("g", 0) or 0) + sign * float(b.get("g", 0) or 0), 3), 0.0)
+        for key in ("th", "t"):
+            hist_a, hist_b = a.get(key), b.get(key)
+            if not hist_a and not hist_b:
+                continue
+            hist = dict(hist_a) if isinstance(hist_a, dict) else {}
+            for bucket, count in (hist_b.items() if isinstance(hist_b, dict) else ()):
+                hist[bucket] = hist.get(bucket, 0) + sign * count
+            hist = {bucket: count for bucket, count in hist.items() if count > 0}
+            if hist:
+                stats[key] = hist
+        result[model] = stats
+    return result
+
+
 def _ledger_values(left, right, subtract=False):
     """Combine JSON day counters, including model/hour details; never sum metadata."""
     result = {}
@@ -1110,7 +1556,9 @@ def _ledger_values(left, right, subtract=False):
         if key == "_sources":
             continue
         a, b = left.get(key), right.get(key)
-        if isinstance(a, dict) or isinstance(b, dict):
+        if key == "perf":
+            result[key] = _ledger_perf_values(a, b, subtract)
+        elif isinstance(a, dict) or isinstance(b, dict):
             result[key] = _ledger_values(a if isinstance(a, dict) else {},
                                          b if isinstance(b, dict) else {}, subtract)
         elif key.startswith("_"):
@@ -1163,7 +1611,7 @@ def _ledger_merge_sources(kept, current, tool=None):
             live = _ledger_values(live, snapshot)
         # v1 had no provenance. Preserve only its unattributed remainder, not
         # the whole old total plus all currently visible sessions.
-        sources["legacy"] = _ledger_values(kept, live, subtract=True)
+        sources["legacy"] = _perf_drop_empty(_ledger_values(kept, live, subtract=True))
     for source, snapshot in current.items():
         authoritative_codex_source = (
             tool in ("codex", "codex_reserve")
@@ -1223,6 +1671,18 @@ def _ledger_add_record_source(sources, identity, day_key, record, hour=None):
     days[day_key] = _ledger_values(days.get(day_key, {}), contribution)
 
 
+def _ledger_same(left, right, skip=()):
+    """账本里同一天的两份值是否相同。浮点允许末位误差：来源「先减后加」会差一个 ulp，
+    不能因此认为这天变了、把整份账本重写一遍。"""
+    if isinstance(left, dict) and isinstance(right, dict):
+        return all(_ledger_same(left.get(key), right.get(key))
+                   for key in (left.keys() | right.keys()) if key not in skip)
+    if (isinstance(left, float) or isinstance(right, float)) and \
+            isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return math.isclose(left, right, rel_tol=1e-9, abs_tol=1e-12)
+    return left == right
+
+
 def ledger_reconcile(tool, live_days, source_days=None):
     """对账:live_days={day: day_dict}(现存日志实时聚合,任意字段结构)。
 
@@ -1235,9 +1695,13 @@ def ledger_reconcile(tool, live_days, source_days=None):
     ledger = _load_ledger()
     stored = ledger["tools"].setdefault(tool, {})
     dirty = False
+    changed_days = set()
     merged = {}
     # 日志中偶发的坏时间戳(如 2024-01-08)不入账本,防止污染永久数据
     max_day = (date.today() + timedelta(days=1)).isoformat()
+    # 过了保留期的天落盘时会裁掉 _sources，下一轮对账又加回来；只差这一项不算改动，
+    # 否则这些天每轮都「变了」，账本每 30 秒整份重写一次
+    source_cutoff = (date.today() - timedelta(days=_LEDGER_SOURCES_RETAIN_DAYS)).isoformat()
     if source_days is not None:
         by_day = {}
         for source, days in source_days.items():
@@ -1255,9 +1719,18 @@ def ledger_reconcile(tool, live_days, source_days=None):
                     if value != kept:
                         stored[dk] = value
                         dirty = True
+                        changed_days.add(dk)
                 merged[dk] = value
                 continue
-            value = _ledger_merge_sources(kept, current, tool)
+            kept_sources = kept.get("_sources") if isinstance(kept, dict) else None
+            if isinstance(kept_sources, dict) and all(
+                    kept_sources.get(source_id) == snapshot
+                    for source_id, snapshot in current.items()):
+                # 这一天的来源一个没变（通常只有今天在变）：合并结果就是账本里那份，
+                # 不必每轮把每一天的所有来源重新相加
+                value = dict(kept)
+            else:
+                value = _ledger_merge_sources(kept, current, tool)
             # Preserve non-counter attribution supplied by the scanner.
             for key in ("projects", "sessions"):
                 live = live_days.get(dk, {}).get(key)
@@ -1265,10 +1738,14 @@ def ledger_reconcile(tool, live_days, source_days=None):
                     value[key] = sorted(set(value.get(key) or []) | set(live))
             merged[dk] = value
             if "2025-01-01" <= dk <= max_day and kept != value:
+                old_day = kept is not None and dk < source_cutoff and "_sources" not in kept
+                if kept is not None and _ledger_same(kept, value, ("_sources",) if old_day else ()):
+                    continue
                 stored[dk] = value
                 dirty = True
+                changed_days.add(dk)
         if dirty:
-            _LEDGER_CACHE["dirty"] = True
+            _ledger_mark_dirty(changed_days)
         return merged
     for dk, live in live_days.items():
         kept = stored.get(dk)
@@ -1290,14 +1767,15 @@ def ledger_reconcile(tool, live_days, source_days=None):
                 continue
             snapshot = {k: v for k, v in live.items()
                         if not isinstance(v, set)}
-            if kept != snapshot:
+            if kept is None or not _ledger_same(kept, snapshot):
                 stored[dk] = snapshot
                 dirty = True
+                changed_days.add(dk)
     for dk, kept in stored.items():
         if dk not in merged:
             merged[dk] = kept          # 日志已整体消失的天:账本兜底
     if dirty:
-        _LEDGER_CACHE["dirty"] = True
+        _ledger_mark_dirty(changed_days)
     return merged
 
 
@@ -1307,31 +1785,29 @@ def ledger_touch(tool):
         ledger = _load_ledger()
         if tool not in ledger.get("tools", {}):
             ledger.setdefault("tools", {})[tool] = {}
-            _LEDGER_CACHE["dirty"] = True
+            _ledger_mark_dirty()
     except Exception:
         pass
 
 
 def _with_scan_cache_lock(fn):
     def locked(*args, **kwargs):
-        try:
-            import fcntl
-        except ImportError:
-            return fn(*args, **kwargs)
-
         lock_path = f"{_SCAN_CACHE_FILE}.lock"
         lock_dir = os.path.dirname(lock_path)
         if lock_dir:
             os.makedirs(lock_dir, exist_ok=True)
         lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            return fn(*args, **kwargs)
-        finally:
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                _lock_file(lock_fd)
+            except OSError:
+                return fn(*args, **kwargs)  # 拿不到锁也照常执行，与没有平台锁时一致
+            try:
+                return fn(*args, **kwargs)
             finally:
-                os.close(lock_fd)
+                _unlock_file(lock_fd)
+        finally:
+            os.close(lock_fd)
     return locked
 
 
@@ -1479,6 +1955,10 @@ def _empty_mimocode():
     return _empty_opencode()
 
 
+def _empty_minimax():
+    return _empty_opencode()
+
+
 def token_total(day):
     return sum(day.get(k, 0) for k in TOKEN_FIELDS)
 
@@ -1509,6 +1989,153 @@ def _iter_cached_token_days(tool_cache):
         day = entry.get("day")
         if isinstance(day, dict) and day.get("date"):
             yield day["date"], day
+
+
+# ---------- 平均输出速度 / TTFT 中位数 ----------
+# 每个请求一个样本：输出 token、生成秒数、TTFT（拿得到才有）。按「天 × 模型」累加进
+# day["perf"]，跟着按会话合并和账本一起走——_ledger_values 对嵌套字典逐项相加，正好是对的。
+# 生成秒数：拿得到首字时间就从首字算到输出结束（纯生成），拿不到就从请求开始算（端到端）。
+# 平均输出速度 = 输出 token 总数 ÷ 生成总秒数，存累加值 o/g/n，合并后再相除，是精确的。
+# TTFT 有长尾（排队、压缩上下文能等上几十秒），平均值会被少数请求拉高，所以取中位数：
+# 存成按 5% 等比分桶的直方图 "th"，桶内插值的误差在 0.1 秒显示精度以内，跨天、跨设备可直接相加。
+_PERF_MIN_OUTPUT = 20       # 输出太少的请求，时间基本都花在网络和排队上，速度没有意义
+_PERF_MAX_TPS = 3000.0      # 比这还快说明时间戳不可信
+_PERF_MAX_SECONDS = 1800.0  # 单个请求超过半小时，多半是中途挂起或时间戳错位
+_PERF_MAX_TTFT = 120.0
+_PERF_TTFT_BASE = 0.05      # 第 0 桶是 [0, 0.05)，第 k 桶是 [0.05×1.05^(k-1), 0.05×1.05^k)
+_PERF_TTFT_RATIO = 1.05
+# 早期缓存和账本里 TTFT 存的是粗分桶 "t"，按桶中点折进细分桶；对应日志重读后就换成精确值
+_PERF_LEGACY_TTFT_EDGES = (0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0,
+                           5.0, 6.0, 8.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 120.0)
+
+
+def _perf_ttft_bucket(seconds):
+    import math
+    if seconds < _PERF_TTFT_BASE:
+        return 0
+    return int(math.floor(math.log(seconds / _PERF_TTFT_BASE) / math.log(_PERF_TTFT_RATIO))) + 1
+
+
+def _perf_ttft_bounds(bucket):
+    if bucket <= 0:
+        return 0.0, _PERF_TTFT_BASE
+    return (_PERF_TTFT_BASE * _PERF_TTFT_RATIO ** (bucket - 1),
+            _PERF_TTFT_BASE * _PERF_TTFT_RATIO ** bucket)
+
+
+def _perf_add(perf, model, out_tokens, gen_seconds, ttft_seconds=None):
+    try:
+        out = int(out_tokens or 0)
+        gen = float(gen_seconds or 0)
+    except (TypeError, ValueError):
+        return False
+    if out < _PERF_MIN_OUTPUT or not 0.2 < gen <= _PERF_MAX_SECONDS or out / gen > _PERF_MAX_TPS:
+        return False
+    stats = perf.setdefault(model or "unknown", {"o": 0, "g": 0.0, "n": 0})
+    stats["o"] += out
+    stats["g"] = round(stats["g"] + gen, 3)
+    stats["n"] += 1
+    try:
+        ttft = float(ttft_seconds) if ttft_seconds is not None else None
+    except (TypeError, ValueError):
+        ttft = None
+    if ttft is not None and 0 <= ttft <= _PERF_MAX_TTFT:
+        hist = stats.setdefault("th", {})
+        bucket = str(_perf_ttft_bucket(ttft))
+        hist[bucket] = hist.get(bucket, 0) + 1
+    return True
+
+
+def _perf_merge(dst, src):
+    for model, stats in (src or {}).items():
+        if not isinstance(stats, dict):
+            continue
+        target = dst.setdefault(model, {"o": 0, "g": 0.0, "n": 0})
+        target["o"] += int(stats.get("o", 0) or 0)
+        target["g"] = round(target["g"] + float(stats.get("g", 0) or 0), 3)
+        target["n"] += int(stats.get("n", 0) or 0)
+        for key in ("th", "t"):
+            for bucket, count in (stats.get(key) or {}).items():
+                hist = target.setdefault(key, {})
+                hist[bucket] = hist.get(bucket, 0) + count
+    return dst
+
+
+def _perf_drop_empty(day):
+    """账本里「旧记录减去现有日志」得到的余量：请求数减到 0 的速度统计没有意义，去掉。"""
+    perf = day.get("perf") if isinstance(day, dict) else None
+    if isinstance(perf, dict):
+        kept = {model: stats for model, stats in perf.items()
+                if isinstance(stats, dict) and int(stats.get("n", 0) or 0) > 0}
+        if kept:
+            day["perf"] = kept
+        else:
+            day.pop("perf", None)
+    return day
+
+
+def _perf_ttft_histogram(stats):
+    """细分桶直方图；旧的粗分桶按桶中点折进来，但 TTFT 样本数不会超过请求数。"""
+    hist = {int(bucket): int(count or 0) for bucket, count in (stats.get("th") or {}).items()
+            if int(count or 0) > 0}
+    room = int(stats.get("n", 0) or 0) - sum(hist.values())
+    edges = _PERF_LEGACY_TTFT_EDGES
+    for bucket, count in sorted((stats.get("t") or {}).items(), key=lambda item: int(item[0])):
+        count = min(int(count or 0), room)
+        if count <= 0:
+            continue
+        index = int(bucket)
+        low = edges[index - 1] if 0 < index <= len(edges) else 0.0
+        fine = _perf_ttft_bucket((low + edges[min(index, len(edges) - 1)]) / 2)
+        hist[fine] = hist.get(fine, 0) + count
+        room -= count
+    return hist
+
+
+def _perf_ttft_median(hist):
+    total = sum(hist.values())
+    if not total:
+        return None
+    half, seen = total / 2, 0
+    for bucket in sorted(hist):
+        count = hist[bucket]
+        if count and seen + count >= half:
+            low, high = _perf_ttft_bounds(bucket)
+            return round(low + (high - low) * ((half - seen) / count), 2)
+        seen += count
+    return None
+
+
+def _perf_summary(perf, name=None):
+    """{"tps", "ttft", "n", "o", "g", "tn", "th", "models": {显示名: {...}}}；没有样本时为 None。
+
+    tps 是平均输出速度，ttft 是 TTFT 中位数；o/g/th 是算出它们的累加值，App 合并多台设备时用。
+    每个模型的名字要和这个工具的模型行一致：默认按 _format_token_models 的归并与标准名；
+    模型行直接用原始名起名的（Claude、Gemini）传 name=nice_model。"""
+    if name is None:
+        # 和模型行同一套归并与标准名，名字才对得上（App 匹配时再忽略大小写和标点）
+        representatives = _model_merge_representatives(perf or {})
+        name = lambda model: nice_model(_model_identity_id(representatives.get(model, model))
+                                        or representatives.get(model, model))
+    total, by_name = {}, {}
+    for model, stats in (perf or {}).items():
+        _perf_merge(total, {"*": stats})
+        _perf_merge(by_name, {name(model): stats})
+
+    def one(stats):
+        if not stats or not stats.get("g"):
+            return None
+        hist = _perf_ttft_histogram(stats)
+        return {"tps": round(stats["o"] / stats["g"], 1), "ttft": _perf_ttft_median(hist),
+                "n": stats["n"], "o": stats["o"], "g": round(stats["g"], 3),
+                "tn": sum(hist.values()), "th": {str(bucket): hist[bucket] for bucket in sorted(hist)}}
+
+    overall = one(total.get("*"))
+    if not overall:
+        return None
+    overall["models"] = {model: value for model, value in
+                         ((model, one(stats)) for model, stats in by_name.items()) if value}
+    return overall
 
 
 def _add_model_usage(models, model, inp=0, out=0, cr=0, cw=0, reason=0,
@@ -1542,6 +2169,8 @@ def _merge_token_day(bucket, day, session=None):
     _add_token_usage(bucket, day.get("in", 0), day.get("out", 0), day.get("cr", 0),
                      day.get("cw", 0), day.get("reason", 0), day.get("cost", 0),
                      credits=day.get("credits", 0), cost_cny=day.get("cost_cny", 0))
+    if day.get("perf"):
+        _perf_merge(bucket.setdefault("perf", {}), day["perf"])
     for model, mv in day.get("models", {}).items():
         _add_model_usage(bucket["models"], model, mv.get("in", 0), mv.get("out", 0),
                          mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0),
@@ -1554,6 +2183,8 @@ def _merge_live_token_day(agg, day):
     _add_token_usage(agg, day.get("in", 0), day.get("out", 0), day.get("cr", 0),
                      day.get("cw", 0), day.get("reason", 0), day.get("cost", 0),
                      credits=day.get("credits", 0), cost_cny=day.get("cost_cny", 0))
+    if day.get("perf"):
+        _perf_merge(agg.setdefault("perf", {}), day["perf"])
     for model, mv in (day.get("models") or {}).items():
         _add_model_usage(agg["models"], model, mv.get("in", 0), mv.get("out", 0),
                          mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0),
@@ -1566,11 +2197,14 @@ def _merge_live_token_day(agg, day):
             agg_hours[hour] += amount
 
 
-def _format_token_models(models, include_prices=True):
+def _format_token_models(models, include_prices=True, price_model=None):
     # Raw log aliases can resolve to the same SwiftUI row ID. Merge before
     # sorting, preserving accumulated costs rather than repricing usage.
+    # price_model：该工具算成本时实际用的查价规则。给了就按它展示单价，
+    # 这样没有公开价、按别的模型估算的行也能看到是按什么价算的（pref）。
+    # 先把同一模型的不同写法（裸名 / 带 provider、大小写、「.」与「-」）合成一行
     canonical_models = {}
-    for model, usage in models.items():
+    for model, usage in _merge_model_identities(models).items():
         model_id = _model_identity_id(model)
         merged = canonical_models.setdefault(model_id, {})
         for field in ("in", "out", "cr", "cw", "reason", "cost", "cost_cny", "credits"):
@@ -1579,16 +2213,26 @@ def _format_token_models(models, include_prices=True):
     sort_key = (lambda kv: -kv[1].get("cost", 0)) if include_prices else (
         lambda kv: -token_total(kv[1]))
     for model_id, v in sorted(canonical_models.items(), key=sort_key):
-        price_id = _exact_pricing_id(model_id) if include_prices else None
+        if not include_prices:
+            price_id = None
+        elif price_model is not None:
+            price_id = price_model(model_id) if model_id else None
+        else:
+            price_id = _pricing_id(model_id) if model_id else None
         p = _raw_price(price_id) if price_id else {
             "in": 0.0, "out": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+        # 单价不是这个模型自己的（查不到公开价，按别的模型估算）时注明参照
+        estimated_from = (nice_model(price_id)
+                          if price_id and _model_identity_id(price_id) != model_id else None)
         result.append({"model_id": model_id, "name": nice_model(model_id),
                        "in": v.get("in", 0), "out": v.get("out", 0),
                         "cr": v.get("cr", 0), "cw": v.get("cw", 0), "reason": v.get("reason", 0),
                         "cost": v.get("cost", 0), "cost_cny": v.get("cost_cny", 0),
                         "credits": v.get("credits", 0),
                         "pin": 0 if v.get("cost_cny") else p["in"],
-                        "pout": 0 if v.get("cost_cny") else p["out"]})
+                        "pout": 0 if v.get("cost_cny") else p["out"],
+                        "pcr": 0 if v.get("cost_cny") else p["cache_read"],
+                        "pref": None if v.get("cost_cny") else estimated_from})
     return result
 
 
@@ -1614,8 +2258,12 @@ def _claude_event_cost(event):
     else:
         write_cost = (int(w5 or 0) / 1e6 * p["write5m"]
                       + int(w1 or 0) / 1e6 * p["write1h"])
-    return (inp / 1e6 * p["in"] + out / 1e6 * p["out"]
+    cost = (inp / 1e6 * p["in"] + out / 1e6 * p["out"]
             + cr / 1e6 * p["cache_read"] + write_cost)
+    tier = _CLAUDE_LONG_PROMPT_TIERS.get(_resolve_id(event.get("model")))
+    if tier and inp + cr + cw > tier[0]:
+        cost *= tier[1]
+    return cost
 
 
 def _reprice_claude_events(file_cache, changed_models):
@@ -1689,6 +2337,156 @@ def _dedupe_claude_events(file_events):
     return selected
 
 
+# 1：每个请求附上计时（生成秒数、首字延迟），升级后整份重扫一次补上历史。
+# 2：请求起点沿父链跳过附件行，找到真正触发请求的用户消息或工具结果。
+_CLAUDE_PERF_VERSION = 2
+# 顶层的 uuid 和 timestamp 紧挨着，正文里的引号都是转义过的，所以这个模式只会命中顶层字段。
+# 用它取用户消息、工具结果这些行的写入时间，不必整行解析大段的工具输出。
+_CLAUDE_LINE_TIME = re.compile(r'"uuid"\s*:\s*"([0-9a-f-]{36})"\s*,\s*"timestamp"\s*:\s*"([^"]+)"')
+# 附件行（系统提醒、待办提示等）顶层固定是 "type":"attachment","uuid":…；parentUuid 是每行第一个键。
+_CLAUDE_ATTACHMENT_LINE = re.compile(r'"type"\s*:\s*"attachment"\s*,\s*"uuid"\s*:\s*"([0-9a-f-]{36})"')
+_CLAUDE_LINE_PARENT = re.compile(r'^\{"parentUuid"\s*:\s*"([0-9a-f-]{36})"')
+
+
+def _claude_note_time(when, line, via=None):
+    """when：触发请求的行（用户消息、工具结果）→ 写入时刻。
+
+    附件有时在回复到达时才写，时间比真正发请求晚，不能当起点：记进 via（附件 → 上一行），
+    算起点时沿父链跳过去。"""
+    match = _CLAUDE_LINE_TIME.search(line)
+    if not match:
+        return
+    attachment = _CLAUDE_ATTACHMENT_LINE.search(line)
+    if via is not None and attachment and attachment.group(1) == match.group(1):
+        parent = _CLAUDE_LINE_PARENT.match(line)
+        via[match.group(1)] = parent.group(1) if parent else None
+        return
+    dt = parse_ts(match.group(2))
+    if dt:
+        when[match.group(1)] = dt.timestamp()
+
+
+# 活跃的长会话文件动辄几十上百 MB，不再每轮从头解析：记下最后一条用户消息（提问或工具结果）
+# 的位置作为切点，下一轮保留切点之前的事件，从切点往后重新解析。一次请求的所有行都在触发它的
+# 那条消息之后，从这里切开不会劈开任何请求，计时也照样完整。切点那一行带指纹，文件被改写、
+# 截断或指纹对不上就退回整份解析。用户消息行顶层的键序固定，行首就能认出来，不用整行解析。
+_CLAUDE_USER_LINE = re.compile(
+    r'^\{"parentUuid":(?:"[0-9a-f-]{36}"|null),"isSidechain":false,'
+    r'(?:"\w+":(?:"[^"\\]*"|true|false|null|-?\d+),)*?"type":"user"')
+
+
+def _claude_parse_lines(handle, offset, line_number, events, when, via):
+    """从二进制句柄当前位置往下逐行解析，和以前按文本整份读一样处理每一行（包括没写完的
+    最后一行）；切点只取写完整的用户消息行，切点之后的内容下一轮总会重新解析。
+
+    返回 (项目目录, 切点, 读到的字节偏移)；切点是最后一条用户消息行的 [偏移, 行号, 指纹]。"""
+    proj = None
+    cut = None
+    for raw in handle:
+        line_number += 1
+        line = raw.decode("utf-8", "ignore")
+        if raw.endswith(b"\n") and _CLAUDE_USER_LINE.match(line):
+            cut = [offset, line_number, hashlib.sha1(raw).hexdigest()[:16]]
+        offset += len(raw)
+        if '"usage"' not in line:
+            _claude_note_time(when, line, via)
+            continue
+        u = _claude_usage(line, want_dt=True)
+        if not u:
+            _claude_note_time(when, line, via)
+            continue
+        if u.get("event_id"):
+            when[u["event_id"]] = u["dt"].timestamp()
+        events.append({
+            "in": u["in"], "out": u["out"], "cr": u["cr"], "cw": u["cw"],
+            "cw5": u.get("cw5"), "cw1": u.get("cw1"),
+            "cost": u["cost"], "model": u.get("model") or "unknown",
+            "cwd": u.get("cwd"), "mid": u.get("mid"),
+            "request_id": u.get("request_id"), "event_id": u.get("event_id"),
+            "sidechain": bool(u.get("sidechain")), "timestamp": u["dt"].isoformat(),
+            "line": line_number,
+            "parent": u.get("parent"), "think_ms": u.get("think_ms"),
+        })
+        if proj is None and u.get("cwd"):
+            proj = u["cwd"]
+    return proj, cut, offset
+
+
+def _claude_parse_file(path, entry, size):
+    """(事件, 项目目录, 切点, 已解析到的偏移)；能从上次的切点续读就续读。"""
+    cut = entry.get("cut") if isinstance(entry, dict) else None
+    with open(path, "rb") as handle:
+        if (cut and entry.get("perf_v") == _CLAUDE_PERF_VERSION
+                and isinstance(entry.get("end"), int) and size >= entry["end"]):
+            handle.seek(cut[0])
+            if hashlib.sha1(handle.readline()).hexdigest()[:16] == cut[2]:
+                handle.seek(cut[0])
+                events, when, via = [], {}, {}
+                proj, new_cut, end = _claude_parse_lines(handle, cut[0], cut[1] - 1,
+                                                         events, when, via)
+                _claude_attach_perf(events, when, via)
+                kept = [event for event in entry.get("events", []) if event.get("line", 0) < cut[1]]
+                return kept + events, entry.get("proj") or proj, new_cut or cut, end
+            handle.seek(0)
+        events, when, via = [], {}, {}
+        proj, cut, end = _claude_parse_lines(handle, 0, 0, events, when, via)
+        _claude_attach_perf(events, when, via)
+        return events, proj, cut, end
+
+
+def _claude_request_start(parent, when, via):
+    for _ in range(64):
+        if parent in when:
+            return when[parent]
+        if parent not in via:
+            return None
+        parent = via[parent]
+    return None
+
+
+def _claude_attach_perf(events, when, via=None):
+    """给同一个请求的每条事件附上计时 [生成秒数, 首字延迟]。
+
+    请求从触发它的那条消息（第一段输出沿 parentUuid 往上、跳过附件后的用户提问或工具结果）
+    写入时开始，到最后一段输出写入时结束。新版 Claude Code 的思考段带 thinkingDurationMs：思考段写入时刻
+    减去它就是第一个 token 到达的时刻——有它就算纯生成速度和首字延迟，没有就只能算端到端。
+    """
+    by_request = {}
+    for event in events:
+        key = event.get("request_id") or event.get("mid")
+        if key:
+            by_request.setdefault(key, []).append(event)
+    for group in by_request.values():
+        times = []
+        for event in group:
+            dt = parse_ts(event.get("timestamp", ""))
+            times.append(dt.timestamp() if dt else None)
+        known = [t for t in times if t is not None]
+        if not known:
+            continue
+        end = max(known)
+        first = None
+        for event, at in zip(group, times):
+            if event.get("think_ms") and at is not None:
+                first = at - float(event["think_ms"]) / 1000
+                break
+        start = _claude_request_start(group[0].get("parent"), when, via or {})
+        gen = ttft = None
+        if first is not None and end > first:
+            gen = end - first
+            if start is not None and first >= start:
+                ttft = first - start
+        elif start is not None and end > start:
+            gen = end - start
+        if gen:
+            timing = [round(gen, 3), round(ttft, 3) if ttft is not None else None]
+            for event in group:
+                event["perf"] = timing
+    for event in events:
+        event.pop("parent", None)
+        event.pop("think_ms", None)
+
+
 def scan_claude(bounds, cache):
     fc = cache.setdefault("claude", {})
     changed = False
@@ -1726,32 +2524,15 @@ def scan_claude(bounds, cache):
             cur_file = f
         sig = f"{mtime}:{size}"
         entry = fc.get(f)
-        if not entry or entry.get("sig") != sig:
-            events = []
-            proj = None
+        if (not entry or entry.get("sig") != sig
+                or entry.get("perf_v") != _CLAUDE_PERF_VERSION):
             try:
-                with open(f, "r", encoding="utf-8", errors="ignore") as fh:
-                    for line_number, line in enumerate(fh, 1):
-                        if '"usage"' not in line:
-                            continue
-                        u = _claude_usage(line, want_dt=True)
-                        if not u:
-                            continue
-                        events.append({
-                            "in": u["in"], "out": u["out"], "cr": u["cr"], "cw": u["cw"],
-                            "cw5": u.get("cw5"), "cw1": u.get("cw1"),
-                            "cost": u["cost"], "model": u.get("model") or "unknown",
-                            "cwd": u.get("cwd"), "mid": u.get("mid"),
-                            "request_id": u.get("request_id"), "event_id": u.get("event_id"),
-                            "sidechain": bool(u.get("sidechain")), "timestamp": u["dt"].isoformat(),
-                            "line": line_number,
-                        })
-                        if proj is None and u.get("cwd"):
-                            proj = u["cwd"]
+                events, proj, cut, end = _claude_parse_file(f, entry, size)
             except OSError:
                 continue
             events = [event for _, event in _dedupe_claude_events((f, item) for item in events)]
-            fc[f] = {"sig": sig, "events": events, "proj": proj}
+            fc[f] = {"sig": sig, "events": events, "proj": proj, "perf_v": _CLAUDE_PERF_VERSION,
+                     "cut": cut, "end": end}
             changed = True
 
     for p in stale:
@@ -1789,6 +2570,10 @@ def scan_claude(bounds, cache):
         model_usage["in"] += event["in"]; model_usage["out"] += event["out"]
         model_usage["cr"] += event["cr"]; model_usage["cw"] += event["cw"]
         model_usage["cost"] += event["cost"]
+        timing = event.get("perf")
+        if timing:
+            _perf_add(day.setdefault("perf", {}), model, event["out"], timing[0],
+                      timing[1] if len(timing) > 1 else None)
         amount = _claude_event_total(event)
         aggregate["hours"][dt.hour] += amount
         aggregate["day_hours"].setdefault(day_key, [0] * 24)[dt.hour] += amount
@@ -1835,6 +2620,8 @@ def scan_claude(bounds, cache):
                 mm = agg["models"].setdefault(mn, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
                 mm["in"] += mv["in"]; mm["out"] += mv["out"]
                 mm["cr"] += mv["cr"]; mm["cw"] += mv["cw"]; mm["cost"] += mv["cost"]
+            if day.get("perf"):
+                _perf_merge(agg.setdefault("perf", {}), day["perf"])
             # 会话数只能来自现存日志(被清日志无从归属)
             try:
                 d = date.fromisoformat(dk)
@@ -1863,6 +2650,8 @@ def scan_claude(bounds, cache):
                 mm["in"] += mv.get("in", 0); mm["out"] += mv.get("out", 0)
                 mm["cr"] += mv.get("cr", 0); mm["cw"] += mv.get("cw", 0)
                 mm["cost"] += mv.get("cost", 0.0)
+            if day.get("perf"):
+                _perf_merge(b.setdefault("perf", {}), day["perf"])
 
     # Current session: sum all days of the most recently modified file
     cur_in = cur_out = cur_cr = cur_cw = 0
@@ -1908,7 +2697,8 @@ def _claude_usage(line, want_dt=False):
     res = {"in": inp, "out": out, "cr": cr, "cw": cw, "cw5": w5, "cw1": w1,
            "model": msg.get("model"), "cwd": o.get("cwd"), "mid": msg.get("id"),
            "request_id": o.get("requestId") or o.get("request_id"),
-           "event_id": o.get("uuid"), "sidechain": o.get("isSidechain") is True}
+           "event_id": o.get("uuid"), "sidechain": o.get("isSidechain") is True,
+           "parent": o.get("parentUuid"), "think_ms": o.get("thinkingDurationMs")}
     res["cost"] = _claude_event_cost(res)
     if want_dt:
         res["dt"] = dt
@@ -2385,8 +3175,28 @@ def _codex_event_cache_dir():
     return f"{_SCAN_CACHE_FILE}{_CODEX_EVENT_CACHE_SUFFIX}"
 
 
+_REALPATH_MEMO = {}
+
+
+def _realpath_memo(path):
+    """同一轮采集里同一个路径只解析一次：realpath 要沿路径逐级 lstat，几千个会话文件每轮
+    解析两遍就是几万次系统调用。采集器每轮是新进程，不会用到过期的结果。"""
+    real = _REALPATH_MEMO.get(path)
+    if real is None:
+        real = _REALPATH_MEMO[path] = os.path.realpath(path)
+    return real
+
+
+def _realpath_in_dir(path):
+    """目录的 realpath 复用，文件本身是软链接时才单独解析；结果与 os.path.realpath 相同。"""
+    if os.path.islink(path):
+        return _realpath_memo(path)
+    directory, name = os.path.split(path)
+    return os.path.join(_realpath_memo(directory), name)
+
+
 def _codex_event_cache_path(file_path):
-    normalized = os.path.normcase(os.path.realpath(file_path))
+    normalized = os.path.normcase(_realpath_memo(file_path))
     digest = hashlib.sha256(normalized.encode("utf-8", errors="surrogatepass")).hexdigest()
     return os.path.join(_codex_event_cache_dir(), f"{digest}.jsonl")
 
@@ -2661,13 +3471,17 @@ def _codex_migrate_event_cache(file_cache):
     return True
 
 
-def _codex_estimated_cost(model, inp, cached, out):
+def _codex_price_model(model):
+    """Codex 一个模型实际按哪个价计：成本和卡片上的单价都用它，两边才对得上。"""
     if _codex_is_reserve_model(model):
         # Reserve 单独计量,按 Luna 级别计价,不吃 gpt-5.5 兜底。
-        price_model = _CODEX_RESERVE_PRICE_MODEL
-    else:
-        price_model = model if _has_known_price(model) else "openai/gpt-5.5"
-    base = _raw_price(price_model)
+        return _CODEX_RESERVE_PRICE_MODEL
+    # 没有公开价的（如自动审批用的 codex-auto-review）按 gpt-5.5 估算
+    return model if _has_known_price(model) else "openai/gpt-5.5"
+
+
+def _codex_estimated_cost(model, inp, cached, out):
+    base = _raw_price(_codex_price_model(model))
     high_context = inp > 272_000
     input_price = base["in"] * (2 if high_context else 1)
     output_price = base["out"] * (1.5 if high_context else 1)
@@ -2772,6 +3586,9 @@ def _codex_add_event(days, event):
     day["reason"] += lr
     day["cost"] += cost
     _add_model_usage(day["models"], model, max(li - lc, 0), lo, lc, 0, lr, cost)
+    if len(event) > 13 and event[13]:
+        _perf_add(day.setdefault("perf", {}), model, lo, event[13],
+                  event[14] if len(event) > 14 else None)
     try:
         hour = datetime.fromisoformat(event[0]).astimezone().hour
         amount = li + lo
@@ -2799,6 +3616,9 @@ def _codex_split_day(day):
         return main, reserve
 
     model_hours = day.get("model_hours") or {}
+    for model, stats in (day.get("perf") or {}).items():
+        target = reserve if _codex_is_reserve_model(model) else main
+        _perf_merge(target.setdefault("perf", {}), {model: stats})
     for model, usage in models.items():
         target = reserve if _codex_is_reserve_model(model) else main
         li = usage.get("in", 0)
@@ -2909,7 +3729,7 @@ def _codex_migrate_mixed_ledger(main_sources, reserve_sources):
             stored[dk] = result
             changed = True
     if changed:
-        _LEDGER_CACHE["dirty"] = True
+        _ledger_mark_dirty()
 
 
 def _codex_accounted_days(cache, reserve=False):
@@ -3223,9 +4043,26 @@ def _codex_probe_record_header(data):
     return timestamp, root_type, payload_type, model
 
 
+# 计时用的两类记录只认行首，不走逐字符的字段探测：每个会话里它们占了大半行数。
+# {"timestamp":"…"(,"ordinal":N),"type":"response_item","payload":{"type":"function_call_output"…
+_CODEX_FAST_HEADER = re.compile(
+    rb'^\{"timestamp":"([^"]+)"(?:,"ordinal":\d+)?,"type":"(\w+)","payload":\{"type":"(\w+)"')
+_CODEX_TRIGGER_TYPES = {
+    (b"response_item", b"function_call_output"), (b"response_item", b"custom_tool_call_output"),
+    (b"event_msg", b"user_message"),
+}
+# 模型开始往外吐字的项。工具执行（CommandExecution、FileChange…）的起止是工具耗时，不算。
+_CODEX_OUTPUT_ITEM = re.compile(rb'"item":\{"type":"(Reasoning|AgentMessage)"')
+_CODEX_ITEM_STARTED = re.compile(rb'"started_at_ms":(\d+)')
+
+
 def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
                               model_limit=64 * 1024, start_offset=0, end_offset=None):
-    """Yield model changes and token records without buffering unrelated large JSONL lines."""
+    """Yield model changes and token records without buffering unrelated large JSONL lines.
+
+    另外为计时产出两类记录：("trigger", 时间戳)——工具结果或用户消息写入，下一个请求从这里
+    开始；("item", started_at_ms)——模型开始输出思考或回复的时刻。"""
+    item_tail = None
     # Recent permission profiles put payload.model beyond the old 4 KB prefix.
     # Keep model probing bounded so large instructions never require full buffering.
     prefix = bytearray()
@@ -3254,6 +4091,8 @@ def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
 
                 if kind == "token":
                     candidate.extend(piece)
+                elif kind == "item":
+                    item_tail = (item_tail + bytes(piece))[-200:]
                 elif kind == "model":
                     take = min(len(piece), model_limit - len(prefix))
                     prefix.extend(piece[:take])
@@ -3268,6 +4107,34 @@ def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
                 elif kind is None and len(prefix) < header_limit:
                     take = min(len(piece), header_limit - len(prefix))
                     prefix.extend(piece[:take])
+                    fast = _CODEX_FAST_HEADER.match(prefix)
+                    if fast and (fast.group(2), fast.group(3)) in _CODEX_TRIGGER_TYPES:
+                        yield "trigger", fast.group(1).decode("ascii", "ignore")
+                        prefix = bytearray()
+                        kind = "ignore"
+                        if newline < 0:
+                            break
+                        prefix = bytearray()
+                        candidate = None
+                        kind = None
+                        start = newline + 1
+                        continue
+                    if (fast and fast.group(3) == b"item_completed"
+                            and _CODEX_OUTPUT_ITEM.search(prefix)):
+                        # started_at_ms 在行尾，只留最后一小段，不缓冲整行思考内容
+                        item_tail = (bytes(prefix) + bytes(piece[take:]))[-200:]
+                        prefix = bytearray()
+                        kind = "item"
+                        if newline < 0:
+                            break
+                        started = _CODEX_ITEM_STARTED.search(item_tail)
+                        if started:
+                            yield "item", int(started.group(1))
+                        item_tail = None
+                        candidate = None
+                        kind = None
+                        start = newline + 1
+                        continue
                     if any(marker in prefix for marker in _CODEX_USAGE_RECORD_MARKERS):
                         timestamp, root_type, payload_type, model = (
                             _codex_probe_record_header(prefix)
@@ -3307,6 +4174,11 @@ def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
 
                 if candidate is not None:
                     yield "token", bytes(candidate)
+                if kind == "item" and item_tail:
+                    started = _CODEX_ITEM_STARTED.search(item_tail)
+                    if started:
+                        yield "item", int(started.group(1))
+                    item_tail = None
                 prefix = bytearray()
                 candidate = None
                 kind = None
@@ -3367,6 +4239,12 @@ def _iter_codex_token_lines(path, chunk_size=64 * 1024, header_limit=4 * 1024):
 # 按最近活跃优先：项目足迹本来就按 last_active 排序，用户看得见的那几行
 # 第一轮就补齐，长尾在后台几分钟内自然补完。
 _CODEX_PROJECT_BACKFILL_PER_SCAN = 150
+# 只给这么多天内活跃过的会话补项目路径。
+#
+# 打开一个会话文件约 10ms，几千个历史会话合起来是几十秒；而项目足迹按最近活跃
+# 排序，几个月前的会话补上了也排在看不见的地方。超出这个窗口的条目写空串占位，
+# 之后不再重试——宁可老项目缺席，也不让每轮扫描替它们反复开文件。
+_CODEX_PROJECT_BACKFILL_DAYS = 60
 
 
 def _codex_session_cwd(path, max_lines=8, max_line_bytes=128 * 1024):
@@ -3389,7 +4267,7 @@ def _codex_session_cwd(path, max_lines=8, max_line_bytes=128 * 1024):
                     continue
                 payload = record.get("payload")
                 cwd = payload.get("cwd") if isinstance(payload, dict) else record.get("cwd")
-                if isinstance(cwd, str) and cwd.startswith("/"):
+                if isinstance(cwd, str) and _is_abs_project_path(cwd):
                     return cwd
     except OSError:
         return None
@@ -3419,10 +4297,14 @@ def _codex_session_meta(path, max_lines=20, max_line_bytes=2 * 1024 * 1024):
                     spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
                     if isinstance(spawn, dict):
                         parent_id = spawn.get("parent_thread_id")
-                return meta.get("id") or meta.get("session_id"), parent_id
+                # 分页续页（history_mode=paginated）用 history_base 标明接在哪一页之后。
+                history_base = meta.get("history_base")
+                if not isinstance(history_base, dict) or not history_base:
+                    history_base = None
+                return meta.get("id") or meta.get("session_id"), parent_id, history_base
     except OSError:
         pass
-    return None, None
+    return None, None, None
 
 
 def _codex_rollout_files():
@@ -3434,7 +4316,7 @@ def _codex_rollout_files():
     seen = set()
     for root in roots:
         for path in sorted(glob.glob(os.path.join(root, "**", "rollout-*.jsonl"), recursive=True)):
-            real = os.path.realpath(path)
+            real = _realpath_in_dir(path)
             key = os.path.normcase(real)
             if key not in seen and os.path.isfile(real):
                 seen.add(key)
@@ -3442,8 +4324,29 @@ def _codex_rollout_files():
     return files
 
 
+_CODEX_UNKNOWN = object()
+
+
+def _codex_page_key(path, entry):
+    """同一会话里「这是哪一页」。
+
+    Codex Desktop 会把一个长会话分页写成多个文件，续页的 session_meta 带
+    history_base（接在第几条之后）。同一页的镜像（sessions/ 与 archived_sessions/
+    各一份）history_base 相同；不同续页各不相同；第一页没有 history_base。
+    早先缓存的条目没存这个字段，用到时再读一次文件头补上。
+    """
+    if "history_base" not in entry:
+        entry["history_base"] = _codex_session_meta(path)[2]
+    base = entry.get("history_base")
+    return json.dumps(base, sort_keys=True) if isinstance(base, dict) else None
+
+
 def _codex_canonical_file_cache(file_cache):
-    """Keep resumed segments; discard only copies covered by another segment."""
+    """Keep resumed segments; discard only copies covered by another segment.
+
+    有 response_ids 的文件按 id 覆盖去重；没有 id 的旧式文件无法逐条比对，
+    同一会话、同一页只留最完整的一份。续页各是一页，不会被当成前一页的副本丢掉。
+    """
     canonical = {}
     groups = {}
     for path, entry in file_cache.items():
@@ -3461,7 +4364,9 @@ def _codex_canonical_file_cache(file_cache):
                 int(entry.get("parsed_size", 0) or 0))
     for copies in groups.values():
         covered = set()
-        legacy_selected = False
+        legacy_pages = set()
+        # 只有同一会话里有两个以上无 id 的文件时才需要分页，平常不碰文件。
+        paged = sum(1 for _, entry in copies if not entry.get("response_ids")) > 1
         for path, entry in sorted(copies, key=score, reverse=True):
             ids = set(entry.get("response_ids") or [])
             if ids:
@@ -3469,11 +4374,42 @@ def _codex_canonical_file_cache(file_cache):
                     continue
                 covered.update(ids)
             else:
-                if legacy_selected:
+                page = _codex_page_key(path, entry) if paged else None
+                if page in legacy_pages:
                     continue
-                legacy_selected = True
+                legacy_pages.add(page)
             canonical[path] = entry
     return canonical
+
+
+# 计时是后来加的：旧缓存里的事件没有它。不为此整体重扫 33GB 历史，而是每轮挑最近几天
+# 改动过、还没带计时的会话，从新到旧重解析一小批，几十轮刷新后最近一周就补齐了。
+# 3：TTFT 改存细分桶直方图，取中位数。
+_CODEX_PERF_VERSION = 3
+_CODEX_PERF_BACKFILL_DAYS = 7
+_CODEX_PERF_BACKFILL_BYTES = 120 * 1024 * 1024
+
+
+def _codex_perf_backfill_targets(file_cache, paths, now=None):
+    now = _time.time() if now is None else now
+    candidates = []
+    for path in paths:
+        entry = file_cache.get(path)
+        if not isinstance(entry, dict) or entry.get("perf_v") == _CODEX_PERF_VERSION:
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if now - st.st_mtime <= _CODEX_PERF_BACKFILL_DAYS * 86400:
+            candidates.append((st.st_mtime, st.st_size, path))
+    targets, budget = set(), _CODEX_PERF_BACKFILL_BYTES
+    for _mtime, size, path in sorted(candidates, reverse=True):
+        if targets and size > budget:
+            break
+        targets.add(path)   # 第一个文件再大也补，否则超大会话永远轮不到
+        budget -= size
+    return targets
 
 
 def scan_codex(bounds, cache):
@@ -3503,6 +4439,7 @@ def scan_codex(bounds, cache):
     dedupe_paths = set()
     active_root = os.path.realpath(CODEX_DIR) if os.path.isdir(CODEX_DIR) else None
     next_checkpoint = _time.monotonic() + _CODEX_SCAN_CHECKPOINT_INTERVAL
+    perf_backfill = _codex_perf_backfill_targets(fc, rollout_files)
 
     for f in rollout_files:
         stale.discard(f)
@@ -3530,11 +4467,11 @@ def scan_codex(bounds, cache):
         if (not entry or entry.get("sig") != sig
                 or entry.get("parser_version") != _CODEX_PARSER_VERSION
                 or entry.get("accounting_version") != _CODEX_ACCOUNTING_VERSION
-                or not event_cache_ready):
+                or not event_cache_ready or f in perf_backfill):
             complete_offset = _codex_complete_offset(f, size)
             file_id = f"{st.st_dev}:{st.st_ino}"
             append_from = None
-            if (isinstance(entry, dict)
+            if (isinstance(entry, dict) and f not in perf_backfill
                     and entry.get("parser_version") == _CODEX_PARSER_VERSION
                     and entry.get("accounting_version") == _CODEX_ACCOUNTING_VERSION):
                 old_offset = int(entry.get("parsed_size", 0) or 0)
@@ -3545,7 +4482,7 @@ def scan_codex(bounds, cache):
 
             if append_from is None:
                 events = []
-                session_id, forked_from_id = _codex_session_meta(f)
+                session_id, forked_from_id, history_base = _codex_session_meta(f)
                 file_limits = None; file_limits_ts = None; file_plan = None
                 file_g_limits = None; file_g_ts = None; file_g_plan = None
                 file_r_limits = None; file_r_ts = None
@@ -3555,11 +4492,14 @@ def scan_codex(bounds, cache):
                 response_ids = set()
                 pending_responses = []
                 last_legacy_snapshot = None
+                perf_trigger = perf_first = None
                 parse_start = 0
             else:
                 events = []
                 session_id = entry.get("session_id")
                 forked_from_id = entry.get("forked_from_id")
+                # 老缓存没有这个键时保持「未知」，由 _codex_page_key 按需补读。
+                history_base = entry.get("history_base", _CODEX_UNKNOWN)
                 file_limits = entry.get("limits"); file_limits_ts = entry.get("limits_ts")
                 file_plan = entry.get("plan")
                 file_g_limits = entry.get("g_limits"); file_g_ts = entry.get("g_ts")
@@ -3572,6 +4512,7 @@ def scan_codex(bounds, cache):
                 response_ids = set(entry.get("response_ids") or [])
                 pending_responses = list(entry.get("pending_responses") or [])
                 last_legacy_snapshot = entry.get("last_legacy_snapshot")
+                perf_trigger, perf_first = (list(entry.get("perf_state") or []) + [None, None])[:2]
                 parse_start = append_from
 
             try:
@@ -3579,6 +4520,19 @@ def scan_codex(bounds, cache):
                         f, start_offset=parse_start, end_offset=complete_offset):
                     if record_kind == "model":
                         file_model = record
+                        continue
+                    if record_kind == "trigger":
+                        # 工具结果 / 用户消息写入：下一个请求从这一刻开始
+                        trigger_ts = parse_ts(record)
+                        if trigger_ts:
+                            perf_trigger = int(trigger_ts.timestamp() * 1000)
+                            perf_first = None
+                        continue
+                    if record_kind == "item":
+                        # 模型开始输出思考或回复；一个请求取最早的那一刻作为首字时间
+                        if (perf_trigger is None or record >= perf_trigger) and (
+                                perf_first is None or record < perf_first):
+                            perf_first = record
                         continue
                     try:
                         o = json.loads(record.decode("utf-8", errors="ignore"))
@@ -3591,6 +4545,8 @@ def scan_codex(bounds, cache):
                     if payload.get("type") == "task_started":
                         pending_responses = []
                         last_legacy_snapshot = None
+                        perf_trigger = int(ts.timestamp() * 1000)
+                        perf_first = None
                         continue
                     is_response = o.get("type") == "token_usage_record"
                     response_id = None
@@ -3686,9 +4642,21 @@ def scan_codex(bounds, cache):
                             model = _CODEX_RESERVE_MODEL
                         cost = _codex_estimated_cost(model, li, lc, lo)
                         totals = total_key if total_key is not None else (None, None, None, None)
-                        # timestamp, local day, cumulative usage, incremental usage, cost
+                        # 这个请求的计时：有首字时间就算纯生成（并给出首字延迟），否则算端到端
+                        end_ms = ts.timestamp() * 1000
+                        gen = ttft = None
+                        if perf_first is not None and end_ms > perf_first:
+                            gen = round((end_ms - perf_first) / 1000, 3)
+                            if perf_trigger is not None and perf_first >= perf_trigger:
+                                ttft = round((perf_first - perf_trigger) / 1000, 3)
+                        elif perf_trigger is not None and end_ms > perf_trigger:
+                            gen = round((end_ms - perf_trigger) / 1000, 3)
+                        # timestamp, local day, cumulative usage, incremental usage, cost,
+                        # model, response id, generation seconds, time to first token
                         if li or lc or lo or lr:
-                            events.append([ts.isoformat(), dk, *totals, li, lc, lo, lr, cost, model, response_id])
+                            events.append([ts.isoformat(), dk, *totals, li, lc, lo, lr, cost, model,
+                                           response_id, gen, ttft])
+                            perf_trigger = perf_first = None
             except OSError:
                 continue
 
@@ -3740,6 +4708,10 @@ def scan_codex(bounds, cache):
                 "accounting_version": _CODEX_ACCOUNTING_VERSION,
                 "response_ids": sorted(response_ids), "pending_responses": pending_responses,
                 "last_legacy_snapshot": last_legacy_snapshot,
+                "perf_state": [perf_trigger, perf_first],
+                # 整份解析过的才带全了计时；只续读过新增部分的，旧事件还没有
+                "perf_v": (_CODEX_PERF_VERSION if append_from is None
+                           else (entry.get("perf_v") if isinstance(entry, dict) else None)),
                 "file_id": file_id, "parsed_size": complete_offset,
                 "parsed_guard": _codex_offset_guard(f, complete_offset),
                 "event_cache_size": event_cache_size,
@@ -3751,6 +4723,8 @@ def scan_codex(bounds, cache):
                 "canonical": was_canonical,
                 "dedupe_peers": entry.get("dedupe_peers") if isinstance(entry, dict) else None,
             }
+            if history_base is not _CODEX_UNKNOWN:
+                fc[f]["history_base"] = history_base
             cache["_dirty"] = True
             if _time.monotonic() >= next_checkpoint:
                 _save_scan_cache(cache)
@@ -3766,11 +4740,18 @@ def scan_codex(bounds, cache):
         dedupe_paths.update(linked_paths)
     # 项目路径按需补齐,让 Codex 参与项目足迹与回顾页。没读到也写空串占位,
     # 免得每轮扫描都为同一批读不出 cwd 的会话重复开文件。
-    pending = [(str(entry.get("last_event_ts") or ""), f, entry)
-               for f, entry in fc.items()
-               if isinstance(entry, dict) and "proj" not in entry]
-    if pending:
-        pending.sort(reverse=True)      # 最近活跃的会话先补，排序用缓存里现成的时间戳
+    horizon = (datetime.now() - timedelta(days=_CODEX_PROJECT_BACKFILL_DAYS)).isoformat()
+    pending, skipped = [], []
+    for f, entry in fc.items():
+        if not isinstance(entry, dict) or "proj" in entry:
+            continue
+        stamp = str(entry.get("last_event_ts") or "")
+        (pending if stamp >= horizon else skipped).append((stamp, f, entry))
+    if pending or skipped:
+        # 窗口外的直接占位，不开文件；窗口内的最近活跃优先，按轮次上限分摊。
+        for _, _f, entry in skipped:
+            entry["proj"] = ""
+        pending.sort(reverse=True)
         for _, f, entry in pending[:_CODEX_PROJECT_BACKFILL_PER_SCAN]:
             cwd, is_subagent = _codex_session_cwd_info(f)
             entry["proj"] = cwd or ""
@@ -3876,6 +4857,8 @@ def scan_codex(bounds, cache):
                         usage.get("out", 0), usage.get("cr", 0),
                         usage.get("cw", 0), usage.get("reason", 0),
                         usage.get("cost", 0))
+                if day.get("perf"):
+                    _perf_merge(bucket.setdefault("perf", {}), day["perf"])
 
     _assemble_codex_ranges(B, merged_days, main_sessions)
 
@@ -4111,19 +5094,43 @@ def _parse_proto_fields(data):
 
 
 # gen_metadata.data 的字段号是逆向出来的,没有官方 schema:
-# 1 = 单次生成记录,其中 19=模型名, 4={2:输入(不含缓存), 3:输出, 5:缓存读, 9:思考},
+# 1 = 单次生成记录,其中 19=模型名,
+#     4={2:输入(不含缓存), 3:输出(含思考), 5:缓存读, 9:思考, 10:回复},本机 38/38 条满足 3 = 9 + 10,
+#     11=首字延迟、12=首字到结束的流式时长(google.protobuf.Duration{1:秒, 2:纳秒}),
 # 9→4→1 = 生成开始时间(秒)。Google 一改编号这里就会静默解出错数,所以下面做了上界校验。
+# 思考是在首字之前、不外露地生成的,所以速度 = 回复 token / 流式时长。
 _ANTIGRAVITY_MAX_TOKENS = 100_000_000  # 单次生成的 token 上界,超了就是解析错位
 _ANTIGRAVITY_MIN_TS = 1_577_836_800    # 2020-01-01,更早的时间戳必然是错位
 
 
+def _proto_duration_seconds(data):
+    seconds = nanos = 0
+    for fn, wt, value in _parse_proto_fields(data):
+        if wt == 0 and fn == 1:
+            seconds = value
+        elif wt == 0 and fn == 2:
+            nanos = value
+    return seconds + nanos / 1e9
+
+
 def _antigravity_gen_step(record, fallback_ts=None):
-    """解一条生成记录 → (model, input, output, cached, thoughts, ts_sec);解不出返回 None。"""
+    """解一条生成记录 → (model, input, output, cached, thoughts, ts_sec, timing);解不出返回 None。
+
+    output 只算回复部分（字段 4.3 已含思考，再加 thoughts 会算两遍）；
+    timing = (首字延迟秒, 流式秒)，记录里没有就是 None。"""
     model = "unknown"
     inp = out = cached = thoughts = 0
+    response = None
     ts_sec = None
+    ttft = stream = None
     for sfn, swt, sval in _parse_proto_fields(record):
-        if sfn == 19 and swt == 2:
+        if sfn in (11, 12) and swt == 2:
+            value = _proto_duration_seconds(sval)
+            if sfn == 11:
+                ttft = value
+            else:
+                stream = value
+        elif sfn == 19 and swt == 2:
             try:
                 model = sval.decode("utf-8")
             except UnicodeDecodeError:
@@ -4140,6 +5147,8 @@ def _antigravity_gen_step(record, fallback_ts=None):
                     cached = tval
                 elif tfn == 9:
                     thoughts = tval
+                elif tfn == 10:
+                    response = tval
         elif sfn == 9 and swt == 2:
             for tfn, twt, tval in _parse_proto_fields(sval):
                 if tfn == 4 and twt == 2:
@@ -4155,7 +5164,9 @@ def _antigravity_gen_step(record, fallback_ts=None):
         return None
     if not model or len(model) > 120 or not model.isprintable():
         model = "unknown"
-    return model, inp, out, cached, thoughts, ts_sec
+    out = response if response is not None else max(out - thoughts, 0)
+    timing = (ttft, stream) if ttft is not None and stream is not None else None
+    return model, inp, out, cached, thoughts, ts_sec, timing
 
 
 def _decode_packed_varints(data):
@@ -4227,11 +5238,12 @@ def _load_antigravity_db(path):
                 step = None
             if step is None:
                 continue
-            model, inp, out, cached, thoughts, ts_sec = step
+            model, inp, out, cached, thoughts, ts_sec, timing = step
             iso_ts = datetime.fromtimestamp(ts_sec, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             if iso_ts > max_ts:
                 max_ts = iso_ts
             events.append({
+                "timing": list(timing) if timing else None,
                 "id": f"{os.path.basename(path)}:{idx}:{record_index}",
                 "timestamp": iso_ts,
                 "model": model,
@@ -4350,6 +5362,12 @@ def _load_gemini_usage_file(path):
     }
 
 
+# 1：Antigravity 的输出不再重复计入思考 token，并带上首字延迟与流式时长。
+# 3：TTFT 改存细分桶直方图，取中位数。
+# 账本按「取大」合并，修正后更小的数要靠版本号才能替换掉旧记录。
+_GEMINI_PARSE_VERSION = 3
+
+
 def scan_gemini(bounds, cache):
     ledger_touch("gemini")
     fc = cache.setdefault("gemini", {})
@@ -4371,11 +5389,12 @@ def scan_gemini(bounds, cache):
         signature = (_sqlite_signature(path) if path.endswith(".db")
                      else f"{stat.st_mtime_ns}:{stat.st_size}")
         entry = fc.get(path)
-        if entry and entry.get("sig") == signature:
+        if entry and entry.get("sig") == signature and entry.get("v") == _GEMINI_PARSE_VERSION:
             continue
         parsed = _load_gemini_usage_file(path)
         if parsed is None:
             continue
+        parsed["v"] = _GEMINI_PARSE_VERSION
         parsed["sig"] = signature
         parsed["mtime"] = stat.st_mtime_ns
         fc[path] = parsed
@@ -4413,7 +5432,11 @@ def scan_gemini(bounds, cache):
             day_key = dt.date().isoformat()
             day = days.setdefault(
                 day_key, {"in": 0, "out": 0, "cached": 0, "thoughts": 0,
-                          "cost": 0.0, "models": {}, "sessions": set(), "hours": [0] * 24})
+                          "cost": 0.0, "models": {}, "sessions": set(), "hours": [0] * 24,
+                          "_ledger_version": _GEMINI_PARSE_VERSION})
+            timing = event.get("timing")
+            if timing:
+                _perf_add(day.setdefault("perf", {}), model, out, timing[1], timing[0])
             day["in"] += inp; day["out"] += out; day["cached"] += cached
             day["thoughts"] += thoughts; day["cost"] += cost; day["sessions"].add(sid)
             day["hours"][dt.hour] += inp + out + thoughts
@@ -4445,6 +5468,8 @@ def scan_gemini(bounds, cache):
             bucket["in"] += day.get("in", 0); bucket["out"] += day.get("out", 0)
             bucket["cached"] += day.get("cached", 0)
             bucket["thoughts"] += day.get("thoughts", 0); bucket["cost"] += day.get("cost", 0)
+            if day.get("perf"):
+                _perf_merge(bucket.setdefault("perf", {}), day["perf"])
             for model, usage in (day.get("models") or {}).items():
                 model_usage = bucket["models"].setdefault(
                     model, {"in": 0, "out": 0, "cached": 0,
@@ -4596,9 +5621,15 @@ def _grok_usage_record(obj):
     cached = min(cached, prompt)
     reasoning = min(reasoning, completion)
     record_id = f"{sid}:{ts}:{loop_index}:{attempts}:{prompt}:{cached}:{completion}:{reasoning}"
-    return {"id": record_id, "ts": ts, "sid": sid,
-            "in": prompt - cached, "cr": cached,
-            "out": completion - reasoning, "reason": reasoning}
+    record = {"id": record_id, "ts": ts, "sid": sid,
+              "in": prompt - cached, "cr": cached,
+              "out": completion - reasoning, "reason": reasoning}
+    # 这次推理的总耗时（发出请求到结束）。Grok 自带的 ttft_ms 和客户端实际收到第一段的
+    # 时刻对不上、含义不明，所以不拿它拆首字，只算端到端速度。
+    elapsed = ctx.get("model_elapsed_ms")
+    if isinstance(elapsed, (int, float)) and elapsed > 0:
+        record["gen"] = round(elapsed / 1000, 3)
+    return record
 
 
 def _grok_usage_cost(record, model):
@@ -4619,9 +5650,13 @@ def _grok_usage_cost(record, model):
     return cost
 
 
+# 1：记录附上推理耗时，升级后整份重读一次（文件只有几 MB）。
+_GROK_USAGE_VERSION = 1
+
+
 def _load_grok_usage_records(cache):
     old = cache.get("grok_usage", {})
-    if not isinstance(old, dict):
+    if not isinstance(old, dict) or old.get("version") != _GROK_USAGE_VERSION:
         old = {}
     try:
         stat = os.stat(GROK_LOG)
@@ -4670,6 +5705,7 @@ def _load_grok_usage_records(cache):
         return records
 
     updated = {
+        "version": _GROK_USAGE_VERSION,
         "sig": signature,
         "file_id": file_id,
         "parsed_size": complete_offset,
@@ -4702,6 +5738,10 @@ def _grok_usage_days(records, sessions, latest_model):
         cost = _grok_usage_cost(record, model)
         _add_token_usage(day, record.get("in", 0), record.get("out", 0),
                          record.get("cr", 0), 0, record.get("reason", 0), cost, model)
+        if record.get("gen"):
+            _perf_add(day.setdefault("perf", {}), model,
+                      int(record.get("out", 0) or 0) + int(record.get("reason", 0) or 0),
+                      record["gen"])
         day["tokens"] += amount
         day["calls"] += 1
         if sid:
@@ -4747,17 +5787,30 @@ def _grok_live_quota_enabled():
     return bool(_tokei_config().get("grok_live_quota_enabled"))
 
 
-def _grok_auth_token():
+# access token 大约 6 小时过期；离过期不足一分钟也按已过期处理。
+_GROK_AUTH_EXPIRY_SKEW = 60
+
+
+def _grok_auth_state(now_epoch=None):
+    """返回 (token, 是否已过期)。
+
+    只读 access token，不代刷：auth.json 与 Grok CLI / OpenUsage 共用，refresh_token
+    会轮换，抢刷会把它们自己的登录顶掉。过期了就交给界面说明，等 grok 下次运行时续期。
+    """
     auth = _load_json(GROK_AUTH, {})
     if not isinstance(auth, dict):
-        return None
+        return None, False
     for entry in auth.values():
         if not isinstance(entry, dict):
             continue
         token = entry.get("key") or entry.get("access_token")
         if isinstance(token, str) and token.strip():
-            return token.strip()
-    return None
+            expires = _iso_to_epoch(entry.get("expires_at")) \
+                if isinstance(entry.get("expires_at"), str) else None
+            now = now_epoch if now_epoch is not None \
+                else datetime.now(timezone.utc).timestamp()
+            return token.strip(), bool(expires and expires - now <= _GROK_AUTH_EXPIRY_SKEW)
+    return None, False
 
 
 def _normalize_grok_billing(config, *, plan=None, source=None, updated=None,
@@ -4925,9 +5978,12 @@ def fetch_grok_live_quota():
     cached = _cached_grok_quota(_GROK_QUOTA_TTL)
     if cached and cached.get("source") == "live":
         return cached
-    token = _grok_auth_token()
+    token, expired = _grok_auth_state()
     if not token:
         return _cached_grok_quota(_GROK_QUOTA_FALLBACK_TTL)
+    if expired:
+        # 过期的 token 只会换来 401；以前每次刷新都白敲一次接口，再悄悄退回本地日志。
+        return {"auth_expired": True}
     try:
         import urllib.request
         req = urllib.request.Request(
@@ -4967,13 +6023,19 @@ def scan_grok_quota():
     if log_quota and not log_quota.get("stale"):
         _save_grok_quota_cache(log_quota)
 
+    auth_expired = False
     if _grok_live_quota_enabled():
         live = fetch_grok_live_quota()
         if live and live.get("pct") is not None:
             return live
+        auth_expired = bool(live and live.get("auth_expired"))
+
+    def with_auth_state(quota):
+        # 实时开关开着却只能给本地值时，把原因带给界面，不装作还在查实时。
+        return {**quota, "auth_expired": True} if auth_expired else quota
 
     if log_quota and log_quota.get("pct") is not None:
-        return log_quota
+        return with_auth_state(log_quota)
 
     cached = _cached_grok_quota(_GROK_QUOTA_FALLBACK_TTL * 12)  # 本地缓存放宽到约 1 小时
     if cached and cached.get("pct") is not None:
@@ -4986,8 +6048,8 @@ def scan_grok_quota():
             out["stale"] = True
             out["pct"] = 0.0
             out["reset"] = None
-        return out
-    return {}
+        return with_auth_state(out)
+    return {"auth_expired": True} if auth_expired else {}
 
 
 # ---------- 千问办公额度 (官方桌面端本机 MCP；需显式开启) ----------
@@ -5031,7 +6093,8 @@ def _read_qwenwork_mcp_config(path=None):
         if hasattr(os, "getuid") and info.st_uid != os.getuid():
             return None
         # x-api-key 可调用适配器的其他工具；只信任当前用户私有的 0600 风格文件。
-        if stat.S_IMODE(info.st_mode) & 0o077:
+        # Windows 没有这套权限位（总报 0o666），用户目录本身由 ACL 隔离。
+        if not _IS_WINDOWS and stat.S_IMODE(info.st_mode) & 0o077:
             return None
         with os.fdopen(fd, "r", encoding="utf-8") as fh:
             fd = None
@@ -5082,7 +6145,7 @@ def _qwenwork_private_file_marker(path):
         return "missing"
     if (not stat.S_ISREG(info.st_mode)
             or (hasattr(os, "getuid") and info.st_uid != os.getuid())
-            or stat.S_IMODE(info.st_mode) & 0o077):
+            or (not _IS_WINDOWS and stat.S_IMODE(info.st_mode) & 0o077)):
         return "untrusted"
     mtime_ns = getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000))
     return f"{info.st_dev}:{info.st_ino}:{mtime_ns}:{info.st_size}"
@@ -5408,6 +6471,7 @@ _PROVIDER_QUOTA_ENV = {
     "zai": "TOKEI_ZAI_QUOTA",
     "antigravity": "TOKEI_ANTIGRAVITY_QUOTA",
     "devin": "TOKEI_DEVIN_QUOTA",
+    "minimax": "TOKEI_MINIMAX_QUOTA",
 }
 
 
@@ -5743,7 +6807,8 @@ def _cursor_app_auth_paths():
         os.path.join(HOME, "Library", "Application Support", "Cursor",
                      "User", "globalStorage", "state.vscdb"),
         os.path.join(HOME, ".config", "Cursor", "User",
-                     "globalStorage", "state.vscdb"))
+                     "globalStorage", "state.vscdb"),
+        os.path.join(APPDATA, "Cursor", "User", "globalStorage", "state.vscdb"))
 
 
 def _cursor_app_session(path=None, now_epoch=None):
@@ -6077,6 +7142,8 @@ def _grok_bot_authorization_generation(path=None):
 
 
 def _grok_bot_helper_path():
+    if _IS_WINDOWS:
+        return None  # 原生助手只有 macOS 版
     configured = os.environ.get("TOKEI_GROK_BOT_HELPER")
     candidates = [configured] if isinstance(configured, str) and configured.strip() else []
     if sys.platform == "darwin":
@@ -6088,28 +7155,236 @@ def _grok_bot_helper_path():
     return None
 
 
-def _grok_bot_helper_sand_usage():
-    helper = _grok_bot_helper_path()
-    if not helper:
+# 辅助程序从年初开始分页拉全部用量事件，用得越多越慢：上万条要一分多钟，同步等它
+# 会拖住整轮刷新，超时又白白丢掉结果。所以放到后台跑：结果先写临时文件再改名，
+# 下一轮来取；只等一小会儿，快的照样当轮拿到。结果文件放在额度缓存旁边。
+_GROK_BOT_HELPER_PENDING = object()
+_GROK_BOT_HELPER_WAIT = 8
+_GROK_BOT_HELPER_MAX_RUNTIME = 600
+_GROK_BOT_HELPER_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _grok_bot_native_marker():
+    account_id = _grok_bot_active_account_id()
+    generation = _grok_bot_authorization_generation()
+    if not account_id or generation is None:
+        return None
+    return _provider_credential_marker("grok-bot-account-v1", account_id, generation)
+
+
+def _grok_bot_helper_files():
+    directory = os.path.dirname(PROVIDER_QUOTA_CACHE) or "."
+    return (os.path.join(directory, "grok_bot_helper.json"),
+            os.path.join(directory, "grok_bot_helper.state.json"))
+
+
+def _grok_bot_helper_running(state):
+    pid, started = state.get("pid"), state.get("started")
+    if not isinstance(pid, int) or not isinstance(started, (int, float)):
+        return False
+    if _time.time() - started > _GROK_BOT_HELPER_MAX_RUNTIME:
+        return False
+    if _IS_WINDOWS:
+        return False  # Windows 上 os.kill(pid, 0) 会直接结束进程，而且这里不会有助手
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _grok_bot_helper_take_result(marker):
+    """后台跑完的结果（属于当前账号与授权的才算），取走即删。"""
+    result_path, state_path = _grok_bot_helper_files()
+    if not os.path.isfile(result_path):
+        return None
+    state = _load_json(state_path, {})
+    try:
+        with open(result_path, "rb") as handle:
+            raw = handle.read(_GROK_BOT_HELPER_MAX_BYTES + 1)
+    except OSError:
         return None
     try:
-        result = subprocess.run(
-            [helper, "--grok-bot-data-json"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=35,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+        os.remove(result_path)
+    except OSError:
+        pass
+    if not isinstance(state, dict) or state.get("marker") != marker \
+            or len(raw) > _GROK_BOT_HELPER_MAX_BYTES:
         return None
-    if result.returncode != 0 or len(result.stdout) > 16 * 1024 * 1024:
-        return None
+    _atomic_write_json(state_path, dict(state, done=True))
     try:
-        payload = json.loads(result.stdout.decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+# 用量事件按天存在额度缓存旁边：今年已有上万条，每次从年初全量拉既慢又会撞上
+# 辅助程序的翻页上限。平时只拉最近两天（--since 那天零点起），这两天整天替换，
+# 更早的日子原样留着；还没有存档时才从年初拉一次。只留今年的，跨年自动清掉。
+def _grok_bot_event_dir():
+    return os.path.join(os.path.dirname(PROVIDER_QUOTA_CACHE) or ".", "grok_bot_events")
+
+
+def _grok_bot_stored_days():
+    """{日期: 事件文件路径}，只算今年的。"""
+    directory = _grok_bot_event_dir()
+    year = str(date.today().year)
+    days = {}
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return days
+    for name in names:
+        day = name[:-5] if name.endswith(".json") else None
+        if day and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and day.startswith(year + "-"):
+            days[day] = os.path.join(directory, name)
+    return days
+
+
+def _grok_bot_events_since():
+    """该从哪天零点（毫秒）起补拉；还没有存档就返回 None，从年初拉。"""
+    days = _grok_bot_stored_days()
+    if not days:
+        return None
+    last = min(date.fromisoformat(max(days)), date.today())
+    start = max(last - timedelta(days=1), date(date.today().year, 1, 1))
+    return int(datetime.combine(start, datetime.min.time()).timestamp() * 1000)
+
+
+def _grok_bot_merge_events(payload):
+    """把这次拉到的事件并进按天的存档，返回换成全年事件的 payload。
+
+    拉取窗口从某天零点开始时，窗口内的日子整天替换（拉到的就是那几天的全部）；
+    旧版辅助程序不认 --since、从年初拉，同样按整段替换处理。"""
+    if not isinstance(payload, dict):
+        return payload
+    directory = _grok_bot_event_dir()
+    year = date.today().year
+    events = payload.get("usageEventsDisplay")
+    if payload.get("usageFetched") is True and isinstance(events, list):
+        try:
+            start = datetime.fromtimestamp(int(payload.get("usageStartDate")) / 1000)
+        except (TypeError, ValueError, OSError, OverflowError):
+            start = None
+        if start is not None:
+            first_full_day = start.date() if start.time() == datetime.min.time() \
+                else start.date() + timedelta(days=1)
+            by_day = {}
+            for event in events:
+                try:
+                    day = datetime.fromtimestamp(int(event.get("timestamp")) / 1000).date()
+                except (AttributeError, TypeError, ValueError, OSError, OverflowError):
+                    continue
+                if day.year == year:
+                    by_day.setdefault(day.isoformat(), []).append(event)
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            stored = _grok_bot_stored_days()
+            for day, path in stored.items():
+                if day >= first_full_day.isoformat() and day not in by_day:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            for day, day_events in by_day.items():
+                if day < start.date().isoformat():
+                    continue
+                path = os.path.join(directory, f"{day}.json")
+                if day < first_full_day.isoformat():
+                    # 窗口从这天中途开始：只补新的，不删旧的
+                    seen = {json.dumps(event, sort_keys=True) for event in day_events}
+                    for event in _load_json(path, []) if day in stored else []:
+                        if json.dumps(event, sort_keys=True) not in seen:
+                            day_events.append(event)
+                # 和 _atomic_write_json 写出来的一模一样，内容没变就不重写
+                content = json.dumps(day_events, ensure_ascii=False, separators=(",", ":"))
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        if handle.read() == content:
+                            continue
+                except OSError:
+                    pass
+                try:
+                    _atomic_write_json(path, day_events)
+                except OSError:
+                    pass
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        names = []
+    for name in names:   # 去年的存档用不上了
+        if name.endswith(".json") and not name.startswith(f"{year}-"):
+            try:
+                os.remove(os.path.join(directory, name))
+            except OSError:
+                pass
+    stored_events = []
+    for _, path in sorted(_grok_bot_stored_days().items()):
+        loaded = _load_json(path, [])
+        if isinstance(loaded, list):
+            stored_events.extend(event for event in loaded if isinstance(event, dict))
+    if not stored_events:
+        return payload
+    return dict(payload, usageFetched=True, usageEventsDisplay=stored_events,
+                usageStartDate=str(int(datetime(year, 1, 1).timestamp() * 1000)))
+
+
+def _grok_bot_helper_start(marker):
+    """后台没在跑就启动一次辅助程序。返回 (是否有一次在跑, 是不是这次启动的)。"""
+    helper = _grok_bot_helper_path()
+    if not helper or not marker:
+        return False, False
+    result_path, state_path = _grok_bot_helper_files()
+    state = _load_json(state_path, {})
+    if isinstance(state, dict) and state.get("marker") == marker and not state.get("done") \
+            and _grok_bot_helper_running(state):
+        return True, False
+    temporary = f"{result_path}.{os.getpid()}.tmp"
+    since = _grok_bot_events_since()
+    since_args = '--since "$3"' if since is not None else ""
+    try:
+        os.makedirs(os.path.dirname(result_path) or ".", mode=0o700, exist_ok=True)
+        process = subprocess.Popen(
+            ["/bin/sh", "-c",
+             f'umask 077; "$0" --grok-bot-data-json {since_args} > "$1" && mv -f "$1" "$2" || rm -f "$1"',
+             helper, temporary, result_path, str(since or "")],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True)
+    except OSError:
+        return False, False
+    _atomic_write_json(state_path, {"pid": process.pid, "started": int(_time.time()), "marker": marker})
+    return True, True
+
+
+def _grok_bot_helper_sand_usage():
+    """跑完的结果、None（拿不到）或 _GROK_BOT_HELPER_PENDING（后台还在跑，下一轮再取）。"""
+    marker = _grok_bot_native_marker()
+    payload = _grok_bot_helper_take_result(marker)
+    if payload is not None:
+        return payload
+    result_path, state_path = _grok_bot_helper_files()
+    state = _load_json(state_path, {})
+    if isinstance(state, dict) and state.get("marker") == marker and not state.get("done") \
+            and state.get("pid") and not _grok_bot_helper_running(state):
+        # 上一次后台跑完了却没留下结果：算一次失败，交给调用方退避
+        _atomic_write_json(state_path, dict(state, done=True))
+        return None
+    running, started_now = _grok_bot_helper_start(marker)
+    if not running:
+        return None
+    if started_now:
+        deadline = _time.time() + _GROK_BOT_HELPER_WAIT
+        while _time.time() < deadline:
+            _time.sleep(0.2)
+            payload = _grok_bot_helper_take_result(marker)
+            if payload is not None:
+                return payload
+            if not _grok_bot_helper_running(_load_json(state_path, {})):
+                _atomic_write_json(state_path, dict(_load_json(state_path, {}), done=True))
+                return None
+    return _GROK_BOT_HELPER_PENDING
 
 
 def _grok_bot_repair_authorization_marker():
@@ -6349,6 +7624,16 @@ def fetch_grok_bot_quota(session=None):
             cached = _cached_provider_quota(
                 "grok_bot", native_marker, _PROVIDER_QUOTA_TTL)
             if cached:
+                finished = _grok_bot_helper_take_result(native_marker)
+                fresh = _grok_bot_provider_data(
+                    _grok_bot_merge_events(finished), updated=finished.get("updated")) \
+                    if finished is not None else None
+                if fresh:
+                    _save_provider_quota_cache("grok_bot", native_marker, fresh)
+                    return fresh
+                # 过了一半有效期就在后台先续上，过期那一刻已经有新结果，不留空档
+                if _cached_provider_quota("grok_bot", native_marker, _PROVIDER_QUOTA_TTL // 2) is None:
+                    _grok_bot_helper_start(native_marker)
                 return cached
             native_fallback = _cached_provider_quota(
                 "grok_bot", native_marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True) \
@@ -6359,9 +7644,11 @@ def fetch_grok_bot_quota(session=None):
                 return {}
             if recent_attempt is None:
                 payload = _grok_bot_helper_sand_usage()
+                if payload is _GROK_BOT_HELPER_PENDING:
+                    return native_fallback   # 后台还在拉，先用上一次的结果
                 if payload is not None:
                     quota = _grok_bot_provider_data(
-                        payload, updated=payload.get("updated"))
+                        _grok_bot_merge_events(payload), updated=payload.get("updated"))
                     if quota:
                         _save_provider_quota_cache("grok_bot", native_marker, quota)
                         return quota
@@ -6419,7 +7706,8 @@ def _zed_connection_settings(settings):
 def _load_zed_connection_settings(path=None):
     path = path or _provider_config_string(
         "TOKEI_ZED_SETTINGS", "zed_settings_path") \
-        or os.path.join(HOME, ".config", "zed", "settings.json")
+        or (os.path.join(APPDATA, "Zed", "settings.json") if _IS_WINDOWS
+            else os.path.join(HOME, ".config", "zed", "settings.json"))
     settings = _load_json(path, {}) if os.path.isfile(path) else {}
     return _zed_connection_settings(settings)
 
@@ -6557,6 +7845,14 @@ def _local_timezone_name():
     configured = os.environ.get("TZ")
     if configured and configured.strip():
         return configured.strip()
+    if _IS_WINDOWS:
+        # Windows 只给得出「China Standard Time」这种名字，不是 IANA 时区；按当前偏移给
+        # Etc/GMT±N（IANA 里的符号与直觉相反：UTC+8 是 Etc/GMT-8）。
+        offset = datetime.now().astimezone().utcoffset()
+        minutes = int(offset.total_seconds() // 60) if offset is not None else 0
+        if minutes % 60 == 0 and minutes != 0:
+            return f"Etc/GMT{-minutes // 60:+d}"
+        return "UTC"
     try:
         target = os.path.realpath("/etc/localtime")
         marker = "/zoneinfo/"
@@ -6973,14 +8269,15 @@ def _antigravity_extract_flag(command, flag):
 
 def _antigravity_process_kind(command):
     lower = command.lower()
+    # Windows 的命令行常带引号："C:\…\language_server_windows_x64.exe" --csrf_token …
     language_server = re.search(
-        r"(^|[/\\])language(?:_|-)server(?:[_-][a-z0-9]+)*(?:\.exe)?(?:\s|$)", lower)
+        r"(^|[/\\])language(?:_|-)server(?:[_-][a-z0-9]+)*(?:\.exe)?\"?(?:\s|$)", lower)
     app_match = ("--app_data_dir" in lower and "antigravity" in lower) or any(
         marker in lower for marker in ("antigravity.app/", "/gemini.app/",
                                        "antigravity ide.app/"))
     if language_server and app_match:
         return "ide"
-    if re.search(r"(^|[/\\])(antigravity-cli|antigravity_cli|agy)(?:\s|[/\\]|$)", lower):
+    if re.search(r"(^|[/\\])(antigravity-cli|antigravity_cli|agy)(?:\.exe)?\"?(?:\s|[/\\]|$)", lower):
         return "cli"
     return None
 
@@ -7036,21 +8333,44 @@ def _record_antigravity_scan(found, now_epoch=None):
         pass
 
 
+def _windows_powershell(script, timeout=10):
+    """跑一段 PowerShell，按 UTF-8 取回输出；没装、超时或出错都返回空串。"""
+    command = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;" + script
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, timeout=timeout, check=False, **_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.decode("utf-8", errors="replace")
+
+
 def _antigravity_running_processes(now_epoch=None):
     if _antigravity_scan_recently_empty(now_epoch):
         return []
-    try:
-        result = subprocess.run(
-            ["/bin/ps", "-ax", "-o", "pid=,command="],
-            capture_output=True, text=True, timeout=2, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    processes = _antigravity_process_infos(result.stdout)
+    if _IS_WINDOWS:
+        # Windows 上的 `ps -ax -o pid=,command=`：每行「pid 命令行」。
+        output = _windows_powershell(
+            "Get-CimInstance Win32_Process | Where-Object CommandLine | "
+            "ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }")
+    else:
+        try:
+            output = subprocess.run(
+                ["/bin/ps", "-ax", "-o", "pid=,command="],
+                capture_output=True, text=True, timeout=2, check=False).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+    processes = _antigravity_process_infos(output)
     _record_antigravity_scan(bool(processes), now_epoch)
     return processes
 
 
 def _antigravity_listening_ports(pid):
+    if _IS_WINDOWS:
+        output = _windows_powershell(
+            f"Get-NetTCPConnection -State Listen -OwningProcess {int(pid)} "
+            "-ErrorAction SilentlyContinue | ForEach-Object { $_.LocalPort }")
+        return sorted({int(value) for value in re.findall(r"^\s*(\d+)\s*$", output, re.M)})
     lsof = next((path for path in ("/usr/sbin/lsof", "/usr/bin/lsof")
                  if os.path.isfile(path) and os.access(path, os.X_OK)), None)
     if not lsof:
@@ -7433,6 +8753,168 @@ def scan_devin_quota():
     return fetch_devin_quota() if _provider_quota_enabled("devin") else {}
 
 
+# ---------- MiniMax Token Plan（用户自愿填写的 Key，联网查询）----------
+# 本地库只有 token 没有额度。额度要拿 Token Plan 的 Subscription Key（sk-cp-…）
+# 去官方接口查，所以默认关闭：用户在设置里填了 Key 才会联网。
+# 返回的 model_remains 有几种写法并存，桌面端自己也是分别解析的：
+#   current_interval_remaining_percent        剩余百分比（数字）
+#   current_interval_used/total_percent       已用 / 总额（字符串，加赠时总额 > 100）
+#   current_interval_total/usage_count        次数；注意 usage_count 其实是「剩余」次数
+# weekly 同理（current_weekly_*），*_status == 3 表示不限量。
+# 中国区与国际区的 Key 不通用：拿错区域的 Key 会得到 1004，此时换另一个区域再试。
+_MINIMAX_QUOTA_ENDPOINTS = {
+    "cn": ("https://www.minimaxi.com/v1/api/openplatform/coding_plan/remains",
+           "https://www.minimax.cn/v1/token_plan/remains"),
+    "global": ("https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
+               "https://www.minimax.io/v1/token_plan/remains"),
+}
+_MINIMAX_UNAUTHORIZED = 1004
+_MINIMAX_UNLIMITED_STATUS = 3
+
+
+def _minimax_number(value):
+    if isinstance(value, str):
+        value = value.strip().rstrip("%").strip()
+    return _provider_number(value)
+
+
+def _minimax_window_usage(entry, prefix):
+    """返回 (已用百分比, 说明)；拿不到时百分比为 None。"""
+    if _provider_number(entry.get(f"{prefix}_status")) == _MINIMAX_UNLIMITED_STATUS:
+        return 0.0, "不限量"
+    remaining = _minimax_number(entry.get(f"{prefix}_remaining_percent"))
+    if remaining is not None:
+        return 100.0 - remaining, None
+    used = _minimax_number(entry.get(f"{prefix}_used_percent"))
+    if used is not None:
+        total = _minimax_number(entry.get(f"{prefix}_total_percent"))
+        return (used / total * 100.0 if total and total > 0 else used), None
+    total = _provider_number(entry.get(f"{prefix}_total_count"))
+    left = _provider_number(entry.get(f"{prefix}_usage_count"))
+    if total and total > 0 and left is not None:
+        used = max(0.0, total - left)
+        return used / total * 100.0, f"{int(used):,}/{int(total):,} 次"
+    return None, None
+
+
+def _minimax_reset(entry, end_key, remains_key, now):
+    reset = _provider_epoch(entry.get(end_key))
+    if reset:
+        return reset
+    remains = _provider_number(entry.get(remains_key))
+    return int(now + remains / 1000.0) if remains and remains > 0 else None
+
+
+def _minimax_status_code(payload):
+    base = payload.get("base_resp") if isinstance(payload, dict) else None
+    code = _provider_number(base.get("status_code")) if isinstance(base, dict) else None
+    return int(code) if code is not None else None
+
+
+def _normalize_minimax_quota(payload, *, region="cn", updated=None):
+    now = int(updated if updated is not None else datetime.now().timestamp())
+    entries = payload.get("model_remains") if isinstance(payload, dict) else None
+    entries = [item for item in entries or [] if isinstance(item, dict)]
+
+    def is_video(item):
+        return "video" in str(item.get("model_name") or "").lower()
+
+    text = next((item for item in entries if item.get("model_name") == "general"), None) \
+        or next((item for item in entries if not is_video(item)), None)
+    windows = []
+    if text:
+        for window_id, title, prefix, end_key, remains_key, minutes in (
+                ("minimax-5h", "5小时额度", "current_interval",
+                 "end_time", "remains_time", 300),
+                ("minimax-weekly", "周额度", "current_weekly",
+                 "weekly_end_time", "weekly_remains_time", 10080)):
+            used, detail = _minimax_window_usage(text, prefix)
+            if used is not None:
+                windows.append(_provider_window(
+                    window_id, title, used, _minimax_reset(text, end_key, remains_key, now),
+                    minutes, detail))
+    video = next((item for item in entries if is_video(item)
+                  and (_provider_number(item.get("current_interval_total_count")) or 0) > 0),
+                 None)
+    if video:
+        used, detail = _minimax_window_usage(video, "current_interval")
+        if used is not None:
+            windows.append(_provider_window(
+                "minimax-video", "视频额度", used,
+                _minimax_reset(video, "end_time", "remains_time", now), None, detail))
+    return {
+        "available": bool(windows),
+        "plan": "Token Plan" if windows else None,
+        "account": None,
+        "windows": windows,
+        "details": [],
+        "source": "minimax-api",
+        "region": region,
+        "updated": now,
+        "stale": False,
+    }
+
+
+def _minimax_regions():
+    configured = (_provider_config_string("TOKEI_MINIMAX_REGION", "minimax_region") or "").lower()
+    if configured in _MINIMAX_QUOTA_ENDPOINTS:
+        return (configured,)
+    # 上次查通的区域先试，省掉一次注定 1004 的请求。
+    last = _latest_cached_provider_quota("minimax") or {}
+    return ("global", "cn") if last.get("region") == "global" else ("cn", "global")
+
+
+def _minimax_quota_payload(api_key, region):
+    """同一区域有新旧两个入口；404 或非 JSON 换下一个，网络错误直接抛出。"""
+    last_error = None
+    for url in _MINIMAX_QUOTA_ENDPOINTS[region]:
+        try:
+            return _provider_json_request(
+                url, headers={"Authorization": f"Bearer {api_key}"}, timeout=8)
+        except (RuntimeError, ValueError) as error:
+            last_error = error
+    raise last_error or RuntimeError("MiniMax quota endpoint unavailable")
+
+
+def fetch_minimax_quota():
+    api_key = _provider_config_string("TOKEI_MINIMAX_API_KEY", "minimax_api_key")
+    if not api_key:
+        return {}
+    marker = _provider_credential_marker("minimax-remains-v1", api_key)
+    cached = _cached_provider_quota("minimax", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    fallback = _cached_provider_quota(
+        "minimax", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+    # 失败后同样按 TTL 节流，Key 填错时不至于每次刷新都去敲接口。
+    if _provider_quota_recent_attempt_result("minimax", marker, _PROVIDER_QUOTA_TTL):
+        return fallback or {}
+    try:
+        for region in _minimax_regions():
+            payload = _minimax_quota_payload(api_key, region)
+            code = _minimax_status_code(payload)
+            if code == _MINIMAX_UNAUTHORIZED:
+                continue
+            if code not in (None, 0):
+                raise RuntimeError(f"MiniMax quota error {code}")
+            quota = _normalize_minimax_quota(payload, region=region)
+            if not quota["available"]:
+                _save_provider_quota_attempt("minimax", marker, result="empty")
+                return fallback or {}
+            _save_provider_quota_cache("minimax", marker, quota)
+            return quota
+        raise PermissionError("MiniMax rejected the Token Plan key")
+    except Exception:
+        _save_provider_quota_attempt("minimax", marker)
+        if fallback:
+            return fallback
+        raise
+
+
+def scan_minimax_quota():
+    return fetch_minimax_quota() if _provider_quota_enabled("minimax") else {}
+
+
 def scan_provider_quotas(errors=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -7442,6 +8924,7 @@ def scan_provider_quotas(errors=None):
         "zai": scan_zai_quota,
         "antigravity": scan_antigravity_quota,
         "devin": scan_devin_quota,
+        "minimax": scan_minimax_quota,
     }
     result = {name: {} for name in (*all_scans, "cursor", "grok_bot")}
     scans = {name: scan for name, scan in all_scans.items()
@@ -7582,6 +9065,8 @@ def scan_grok(bounds, cache=None):
                 _add_model_usage(bucket["models"], model, usage.get("in", 0),
                                  usage.get("out", 0), usage.get("cr", 0), 0,
                                  usage.get("reason", 0), usage.get("cost", 0))
+            if day.get("perf"):
+                _perf_merge(bucket.setdefault("perf", {}), day["perf"])
             bucket["usage_calls"] += int(day.get("calls", 0) or 0)
     return {"ranges": B, "model": latest_model, "days": usage_days}
 
@@ -7751,7 +9236,7 @@ def scan_qoder_ide(bounds, cache):
 
     # 默认关闭，需在 config.json 中显式启用
     try:
-        with open(os.path.join(_USER_DIR, "config.json"), "r") as f:
+        with open(os.path.join(_USER_DIR, "config.json"), "r", encoding="utf-8") as f:
             cfg = json.load(f)
         if not cfg.get("qoder_ide_enabled"):
             if fc:
@@ -7902,6 +9387,54 @@ def scan_qoder_ide(bounds, cache):
 
 # ---------- Hermes ----------
 # SQLite: ~/.hermes/state.db (旧布局) + ~/.hermes/profiles/*/state.db (profile 布局)
+# agent.log 每次 API 调用一行：
+#   2026-06-04 18:03:59,497 INFO [...] agent.conversation_loop: API call #1: model=grok-4.3
+#   provider=xai-oauth in=17277 out=326 total=17603 latency=5.9s ...
+# latency 是发出请求到收完的时间（含重试退避），只能算端到端；out 已含推理。
+_HERMES_API_CALL = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}) [\d:,]+ .*?API call #\d+: model=(\S+) .*?\bout=(\d+) .*?\blatency=([\d.]+)s")
+
+
+def _hermes_log_perf(cache):
+    """{日期: {模型: 速度样本}}，按日志文件签名缓存。"""
+    store = cache.setdefault("hermes_logs", {})
+    paths = [os.path.join(HOME, ".hermes", "logs", "agent.log")]
+    profiles = os.path.join(HOME, ".hermes", "profiles")
+    if os.path.isdir(profiles):
+        paths += [os.path.join(profiles, name, "logs", "agent.log") for name in os.listdir(profiles)]
+    paths = [path for path in paths if os.path.isfile(path)]
+    for path in set(store) - set(paths):
+        store.pop(path, None)
+        cache["_dirty"] = True
+    for path in paths:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        sig = f"{st.st_mtime_ns}:{st.st_size}"
+        if isinstance(store.get(path), dict) and store[path].get("sig") == sig:
+            continue
+        days = {}
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    if "API call #" not in line:
+                        continue
+                    match = _HERMES_API_CALL.search(line)
+                    if match:
+                        _perf_add(days.setdefault(match.group(1), {}), match.group(2),
+                                  int(match.group(3)), float(match.group(4)))
+        except OSError:
+            continue
+        store[path] = {"sig": sig, "days": days}
+        cache["_dirty"] = True
+    merged = {}
+    for entry in store.values():
+        for day_key, perf in (entry.get("days") or {}).items():
+            _perf_merge(merged.setdefault(day_key, {}), perf)
+    return merged
+
+
 def _hermes_db_paths():
     paths = []
     if os.path.isfile(HERMES_DB):
@@ -8082,7 +9615,7 @@ def _scan_hermes_db(db_path, _sq):
             if session_id in sessions:
                 day_sessions.setdefault(dk, set()).add(session_id)
             workdir = (sessions.get(session_id) or {}).get("cwd")
-            if isinstance(workdir, str) and workdir.startswith("/"):
+            if isinstance(workdir, str) and _is_abs_project_path(workdir):
                 bucket = day.setdefault("projects", {}).setdefault(
                     workdir, {"tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
                 total = inp + out + cr + cw + reason
@@ -8101,26 +9634,34 @@ def _scan_hermes_db(db_path, _sq):
     return days
 
 
-# ---------- Qoder CLI ----------
+# ---------- Qoder CLI / Qoder CN ----------
 # Qoder CLI 与新版 Qoder App 共用 ~/.qoder/projects Agent transcript。
+# 国内版 Qoder CN 写 ~/.qoder-cn/projects，格式相同，单独成键 qodercli_cn：
+# 缓存、账本、schema 各管各的，两边不会串数。
 # 旧 Qoder Desktop 的 transcript/ 镜像由 local.db 统计，不进入此采集器。
-_QODERCLI_DIR = os.path.join(HOME, ".qoder", "projects")
-_QODERCLI_PARSER_VERSION = 2
+_QODERCLI_DIRS = {
+    "qodercli": (os.path.join(HOME, ".qoder", "projects"), "TOKEI_QODERCLI_DIR", "Qoder CLI"),
+    "qodercli_cn": (os.path.join(HOME, ".qoder-cn", "projects"), "TOKEI_QODERCLI_CN_DIR",
+                    "Qoder CN"),
+}
+# 3：回复附上起止时刻，用来算端到端速度。
+_QODERCLI_PARSER_VERSION = 3
 _QODERCLI_LEDGER_VERSION = 1
 
 
-def _prepare_qodercli_ledger():
+def _prepare_qodercli_ledger(tool="qodercli"):
     ledger = _load_ledger()
-    if ledger.get("qodercli_schema") == _QODERCLI_LEDGER_VERSION:
+    schema_key = f"{tool}_schema"
+    if ledger.get(schema_key) == _QODERCLI_LEDGER_VERSION:
         return
-    ledger.setdefault("tools", {})["qodercli"] = {}
-    ledger["qodercli_schema"] = _QODERCLI_LEDGER_VERSION
-    _LEDGER_CACHE["dirty"] = True
+    ledger.setdefault("tools", {})[tool] = {}
+    ledger[schema_key] = _QODERCLI_LEDGER_VERSION
+    _ledger_mark_dirty()
 
 
-def _qodercli_dir():
-    return os.path.abspath(os.path.expanduser(
-        os.environ.get("TOKEI_QODERCLI_DIR", _QODERCLI_DIR)))
+def _qodercli_dir(tool="qodercli"):
+    default, env_name, _label = _QODERCLI_DIRS[tool]
+    return os.path.abspath(os.path.expanduser(os.environ.get(env_name, default)))
 
 
 def _empty_qodercli():
@@ -8191,6 +9732,13 @@ def _merge_qodercli_event(existing, candidate):
         existing.get("usage_available") or candidate.get("usage_available"))
     if not merged.get("model"):
         merged["model"] = other.get("model")
+    # 同一回复分几行写：开始取最早的触发时刻，结束取最后一行
+    starts = [value for value in (existing.get("start"), candidate.get("start")) if value]
+    ends = [value for value in (existing.get("end"), candidate.get("end")) if value]
+    if starts:
+        merged["start"] = min(starts)
+    if ends:
+        merged["end"] = max(ends)
     return merged
 
 
@@ -8201,7 +9749,8 @@ def _parse_qodercli_file(path):
     message_requests = {}
     model = None
     prev_ts = None
-    with open(path, "r", errors="replace") as f:
+    trigger = None   # 最近一条用户消息 / 工具结果的时刻：下一次回复从这里开始
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line_number, line in enumerate(f, 1):
             line = line.strip()
             if not line:
@@ -8274,12 +9823,14 @@ def _parse_qodercli_file(path):
                     model = event_model
                 event = {"id": str(response_id), "day": dk, "hour": dt.hour,
                          "model": event_model, "est": assistant_est,
-                         "tools": sorted(tool_ids), **usage}
+                         "tools": sorted(tool_ids), "start": trigger, "end": ts, **usage}
                 existing = responses.get(str(response_id))
                 if prior is not None:
                     existing = _merge_qodercli_event(existing, prior)
                 responses[str(response_id)] = _merge_qodercli_event(existing, event)
-            elif not row.get("isMeta") and not row.get("isSidechain"):
+            else:
+                trigger = ts
+            if typ == "user" and not row.get("isMeta") and not row.get("isSidechain"):
                 texts = []
                 if isinstance(content, str):
                     texts = [content]
@@ -8337,6 +9888,11 @@ def _qodercli_usage_days(entries, use_cached=True):
         hour = event.get("hour")
         if isinstance(hour, int) and 0 <= hour < 24:
             day["hours"][hour] += token_total
+        start, end = event.get("start"), event.get("end")
+        if start and end and end > start:
+            # 端到端：从触发它的用户消息或工具结果算到最后一行
+            _perf_add(day.setdefault("perf", {}), event.get("model"),
+                      int(event.get("out", 0) or 0), end - start)
         model_name = event.get("model")
         if model_name and (token_total > 0 or event.get("credits", 0)):
             model_usage = day["models"].setdefault(model_name,
@@ -8347,17 +9903,17 @@ def _qodercli_usage_days(entries, use_cached=True):
     return days
 
 
-def scan_qodercli(bounds, cache):
-    _prepare_qodercli_ledger()
-    ledger_touch("qodercli")
-    fc = cache.setdefault("qodercli", {})
+def scan_qodercli(bounds, cache, tool="qodercli"):
+    _prepare_qodercli_ledger(tool)
+    ledger_touch(tool)
+    fc = cache.setdefault(tool, {})
     if fc.get("_parser") != _QODERCLI_PARSER_VERSION:
         fc.clear()
         fc["_parser"] = _QODERCLI_PARSER_VERSION
         fc["_requests"] = {}
         cache["_dirty"] = True
     request_index = fc.setdefault("_requests", {})
-    root = _qodercli_dir()
+    root = _qodercli_dir(tool)
     paths = []
     if os.path.isdir(root):
         paths = glob.glob(os.path.join(root, "*", "*.jsonl"))
@@ -8438,7 +9994,7 @@ def scan_qodercli(bounds, cache):
     for key in RANGE_KEYS:
         B[key]["sessions"] = len(range_sessions[key])
         B[key]["sub_agents"] = len(range_subagents[key])
-    for dk, day in ledger_reconcile("qodercli", live_days).items():
+    for dk, day in ledger_reconcile(tool, live_days).items():
         try:
             d = date.fromisoformat(dk)
         except ValueError:
@@ -8450,6 +10006,8 @@ def scan_qodercli(bounds, cache):
                 target[field] += int(day.get(field, 0) or 0)
             target["credits"] += float(day.get("credits", 0.0) or 0.0)
             target["usage_available"] = target["usage_calls"] > 0
+            if day.get("perf"):
+                _perf_merge(target.setdefault("perf", {}), day["perf"])
             for model_name, usage in (day.get("models") or {}).items():
                 model_target = target["models"].setdefault(model_name,
                     {"in": 0, "out": 0, "cr": 0, "cw": 0, "credits": 0.0})
@@ -8535,6 +10093,13 @@ def scan_hermes(bounds, cache):
                 for key in TOKEN_FIELDS:
                     mm[key] += mv.get(key, 0)
                 mm["cost"] += mv.get("cost", 0)
+    for day_key, perf in _hermes_log_perf(cache).items():
+        try:
+            d = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for k in classify_date(d, bounds):
+            _perf_merge(B[k].setdefault("perf", {}), perf)
     if changed:
         cache["_dirty"] = True
     return {"ranges": B}
@@ -8544,7 +10109,8 @@ def scan_hermes(bounds, cache):
 # 全局 SQLite: $OPENCLAW_STATE_DIR/state/openclaw.sqlite（任务 + agent DB 注册表）
 # Agent SQLite: agent_databases.path -> transcript_events.event_json（新版 token 用量）
 # Session JSONL: $OPENCLAW_STATE_DIR/agents/*/sessions/*.jsonl（旧版 token 用量）
-_OPENCLAW_PARSER_VERSION = 2
+# 3：附上每条回复的端到端耗时。
+_OPENCLAW_PARSER_VERSION = 3
 _OPENCLAW_LEDGER_VERSION = 2
 
 
@@ -8724,15 +10290,22 @@ def _openclaw_usage_record(event, created_at=None, session_model=None):
         cost = (inp / 1e6 * price["in"] + out / 1e6 * price["out"]
                 + cr / 1e6 * price["cache_read"] + cw / 1e6 * price["cache_write"])
 
-    return {"date": occurred_at.date().isoformat(), "hour": occurred_at.hour,
-            "in": inp, "out": out, "cr": cr, "cw": cw, "reason": reason,
-            "cost": cost, "model": model}
+    record = {"date": occurred_at.date().isoformat(), "hour": occurred_at.hour,
+              "in": inp, "out": out, "cr": cr, "cw": cw, "reason": reason,
+              "cost": cost, "model": model}
+    seconds = _pi_stream_seconds(event.get("timestamp"), message.get("timestamp"))
+    if seconds:
+        record["gen"] = round(seconds, 3)
+    return record
 
 
 def _openclaw_add_record(days, record):
     day = days.setdefault(record["date"], _empty_token_day())
     _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
                      record["reason"], record["cost"], record["model"])
+    if record.get("gen"):
+        # reasoningTokens 已含在 output 里
+        _perf_add(day.setdefault("perf", {}), record["model"], record["out"], record["gen"])
     day["hours"][record["hour"]] += _openclaw_token_total(record)
 
 
@@ -9013,6 +10586,8 @@ def scan_openclaw(bounds, cache):
             b["cr"] += day.get("cr", 0); b["cw"] += day.get("cw", 0)
             b["reason"] += day.get("reason", 0)
             b["cost"] += day.get("cost", 0)
+            if day.get("perf"):
+                _perf_merge(b.setdefault("perf", {}), day["perf"])
             for mn, mv in (day.get("models") or {}).items():
                 mm = b["models"].setdefault(
                     mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
@@ -9052,11 +10627,100 @@ def _pi_model_id(msg):
     return model or provider or "unknown"
 
 
+# 经网关（如 magpie）选路由组时，会话里有两个模型名：message.model 是「请求的」，
+# 可能是 group/<id> 这种分组名，根本不是一个模型；responseModel 是回包里厂商报的、
+# 真正作答的那个。归因和计价都按后者，取不到再退回请求名。
+# 厂商有时把真实名报成 auto 之类（「我自己挑了一个」），说不出是哪个模型，也不采用。
+_MODEL_PLACEHOLDERS = {"auto", "default", "unknown", "none"}
+
+
+def _names_model(model):
+    """这个名字是否点出了一个具体模型（分组名、占位值都不算）。"""
+    s = (model or "").strip()
+    if not s or s.startswith("group/"):
+        return False
+    return s.rsplit("/", 1)[-1].lower() not in _MODEL_PLACEHOLDERS
+
+
+def _pi_served_model(msg):
+    """pi-ai 系消息里真正作答的模型；裸名补上 provider 前缀，好和带前缀的写法归并。"""
+    served = msg.get("responseModel") if isinstance(msg, dict) else None
+    served = served.strip() if isinstance(served, str) else ""
+    if not served:
+        return ""
+    provider = msg.get("provider")
+    provider = provider.strip() if isinstance(provider, str) else ""
+    if provider and "/" not in served and not served.startswith("group/"):
+        return f"{provider}/{served}"
+    return served
+
+
+def _served_identity(served, requested):
+    """真实名优先、请求名兜底；都没有就是 unknown。"""
+    served = (served or "").strip()
+    if _names_model(served):
+        return served
+    return (requested or "").strip() or "unknown"
+
+
+def _has_model_provider(model):
+    s = (model or "").strip()
+    return "/" in s and not s.startswith("group/")
+
+
+def _model_merge_key(model):
+    """同一模型不同写法的归并键：只吸收 provider 前缀有无、大小写、「.」与「-」。
+
+    版本日期不吸收（带日期的和基础版是两个模型）；分组名原样保留、不参与归并。"""
+    s = (model or "").strip().lower()
+    if not s or s == "unknown" or s.startswith("group/"):
+        return s
+    return s.rsplit("/", 1)[-1].replace(".", "-")
+
+
+def _model_merge_representatives(models):
+    """{原始名: 代表名}：同一归并键下优先用带 provider 的写法，否则用最先出现的。"""
+    chosen = {}
+    for model in models:
+        key = _model_merge_key(model)
+        current = chosen.get(key)
+        if current is None or (_has_model_provider(model) and not _has_model_provider(current)):
+            chosen[key] = model
+    return {model: chosen[_model_merge_key(model)] for model in models}
+
+
+def _merge_model_identities(models):
+    """把同一模型的不同写法（见 _model_merge_key）合成一行，用量逐项相加。"""
+    representatives = _model_merge_representatives(models)
+    merged = {}
+    for model, usage in models.items():
+        target = merged.setdefault(representatives[model], {})
+        for field, value in usage.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                target[field] = target.get(field, 0) + value
+    return merged
+
+
 def _pi_usage_int(usage, *fields):
     for field in fields:
         if field in usage and usage[field] is not None:
             return int(usage[field] or 0)
     return 0
+
+
+def _pi_stream_seconds(persisted, started):
+    """pi-ai 系（Pi、Prime Agent、OpenClaw）：message.timestamp 是开始流式请求的时刻
+    （毫秒），外层记录的 timestamp 是这条回复写入的时刻。两者之差是端到端耗时。"""
+    end = parse_ts(persisted) if isinstance(persisted, str) else None
+    if isinstance(started, (int, float)) and not isinstance(started, bool):
+        start = started / 1000 if started > 1e11 else float(started)
+    else:
+        parsed = parse_ts(started) if isinstance(started, str) else None
+        start = parsed.timestamp() if parsed else None
+    if end is None or start is None:
+        return None
+    seconds = end.timestamp() - start
+    return seconds if 0.2 < seconds <= _PERF_MAX_SECONDS else None
 
 
 def _pi_usage_cost(u, model):
@@ -9067,7 +10731,11 @@ def _pi_usage_cost(u, model):
     parts = sum(float(cost_obj.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "cacheWrite"))
     if parts > 0:
         return parts
-    p = _raw_price(model)
+    # 日志没带成本、模型也没有公开价时不估美元（以前落到 Opus 兜底价）
+    price_id = _pricing_id(model)
+    if not price_id:
+        return 0.0
+    p = _raw_price(price_id)
     inp = _pi_usage_int(u, "input")
     out = _pi_usage_int(u, "output")
     cr = _pi_usage_int(u, "cacheRead", "cache_read")
@@ -9075,7 +10743,15 @@ def _pi_usage_cost(u, model):
     return inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"]
 
 
+# 解析口径版本。1：没有公开价的模型不再按 Opus 兜底价估美元。
+# 2：不带厂商前缀的模型名按名字到价目表里查价。3：没有的沿用上一个版本的价。
+# 4：附上每条回复的端到端耗时。
+# 5：经网关选路由组时按回包里真正作答的模型归因（responseModel）。
+_PI_PARSER_VERSION = 5
+
+
 def scan_pi(bounds, cache):
+    _prepare_unpriced_cost_ledger("pi")
     ledger_touch("pi")
     fc = cache.setdefault("pi", {})
     changed = False
@@ -9101,7 +10777,7 @@ def scan_pi(bounds, cache):
             continue
         sig = f"{st.st_mtime}:{st.st_size}"
         entry = fc.get(f)
-        if not entry or entry.get("sig") != sig:
+        if not entry or entry.get("sig") != sig or entry.get("parser") != _PI_PARSER_VERSION:
             days = {}
             proj = None
             sid = os.path.basename(f)
@@ -9134,17 +10810,21 @@ def scan_pi(bounds, cache):
                         cr = _pi_usage_int(u, "cacheRead", "cache_read")
                         cw = _pi_usage_int(u, "cacheWrite", "cache_write")
                         reason = _pi_usage_int(u, "reasoning", "reason", "reasoningTokens")
-                        model = _pi_model_id(msg)
+                        model = _served_identity(_pi_served_model(msg), _pi_model_id(msg))
                         cost = _pi_usage_cost(u, model)
                         if inp + out + cr + cw + reason == 0 and cost <= 0:
                             continue
                         dk = dt.astimezone().date().isoformat()
                         day = days.setdefault(dk, _empty_token_day())
                         _add_token_usage(day, inp, out, cr, cw, reason, cost, model)
+                        seconds = _pi_stream_seconds(o.get("timestamp"), msg.get("timestamp"))
+                        if seconds:
+                            _perf_add(day.setdefault("perf", {}), model, out, seconds)
                         day["hours"][dt.astimezone().hour] += inp + out + cr + cw + reason
             except OSError:
                 continue
-            fc[f] = {"sig": sig, "days": days, "proj": proj, "sid": sid}
+            fc[f] = {"sig": sig, "parser": _PI_PARSER_VERSION,
+                     "days": days, "proj": proj, "sid": sid}
             changed = True
 
     for p in stale:
@@ -9227,7 +10907,7 @@ def _parse_prime_session_file(path):
                 dt = parse_ts(obj.get("timestamp") or msg.get("timestamp") or "")
                 if dt is None:
                     continue
-                current_model = _pi_model_id(msg)
+                current_model = _served_identity(_pi_served_model(msg), _pi_model_id(msg))
                 current_model = current_model if current_model != "unknown" else model
                 inp = _pi_usage_int(usage, "input")
                 out = _pi_usage_int(usage, "output")
@@ -9242,16 +10922,24 @@ def _parse_prime_session_file(path):
                 events.append({"key": key, "date": dt.astimezone().date().isoformat(),
                                "hour": dt.astimezone().hour, "in": inp, "out": out,
                                "cr": cr, "cw": cw, "reason": reason, "cost": cost,
-                               "model": current_model})
+                               "model": current_model,
+                               "gen": _pi_stream_seconds(obj.get("timestamp"),
+                                                         msg.get("timestamp"))})
     except OSError:
         return {"session": session_id, "proj": project, "events": [], "days": {}}
     for event in events:
         day = days.setdefault(event["date"], _empty_token_day())
         _add_token_usage(day, event["in"], event["out"], event["cr"], event["cw"],
                          event["reason"], event["cost"], event["model"])
+        if event.get("gen"):
+            _perf_add(day.setdefault("perf", {}), event["model"], event["out"], event["gen"])
         day["hours"][event["hour"]] += token_total(event)
     return {"session": session_id, "sid": session_id, "proj": project,
-            "events": events, "days": days}
+            "events": events, "days": days, "perf_v": _PRIME_PARSER_VERSION}
+
+
+# 缓存口径版本，变了就重读一次。1：附上回复计时。2：按真正作答的模型归因。
+_PRIME_PARSER_VERSION = 2
 
 
 def scan_prime_agent(bounds, cache):
@@ -9272,7 +10960,8 @@ def scan_prime_agent(bounds, cache):
             continue
         sig = f"{st.st_mtime_ns}:{st.st_size}"
         entry = fc.get(path)
-        if not isinstance(entry, dict) or entry.get("sig") != sig:
+        if not isinstance(entry, dict) or entry.get("sig") != sig \
+                or entry.get("perf_v") != _PRIME_PARSER_VERSION:
             parsed = _parse_prime_session_file(path)
             parsed["sig"] = sig
             fc[path] = parsed
@@ -9345,7 +11034,11 @@ def scan_prime_agent(bounds, cache):
 # 两个独立 App 共用解析逻辑,但缓存、账本和展示分别统计。
 # 每个带 usage 的 item 代表一次模型调用。providerData 中的同一份 usage 仅作字段补全，
 # 不重复累计；reasoning_tokens 已包含在 output_tokens 中。
-_WORKBUDDY_PARSER_VERSION = 2
+# 3：没有公开价的模型不再按 Opus 兜底价估美元（与 CodeBuddy 一致）。
+# 4：不带厂商前缀的模型名（Hy4 preview）按名字到价目表里查价。
+# 5：价目表里没有的沿用同一版本线上一个版本的价。
+# 6：带用量的记录附上端到端耗时（从上一个用户消息或工具结果算起）。
+_WORKBUDDY_PARSER_VERSION = 6
 
 
 def _workbuddy_number(obj, *keys):
@@ -9475,15 +11168,15 @@ def _workbuddy_usage_record(item, model_id_first=False):
                   ("requestModelName", "requestModelId"))
     model = (provider.get(model_keys[0]) or provider.get(model_keys[1])
              or provider.get("model") or message.get("model") or item.get("model") or "unknown")
-    price = _raw_price(str(model))
+    # 没有公开价的模型不估美元：以前会落到 Opus 兜底价，混元、Step 这类便宜模型
+    # 被算出几百美元。CodeBuddy 自带 Credit 计量，更严格，只认精确价。
+    price_id = _pricing_id(str(model))
+    if model_id_first and not _exact_pricing_id(_model_identity_id(str(model))):
+        price_id = None
+    price = _raw_price(price_id) if price_id else None
     cost = (input_tokens / 1e6 * price["in"] + output / 1e6 * price["out"]
             + cache_read / 1e6 * price["cache_read"]
-            + cache_write / 1e6 * price["cache_write"])
-    # CodeBuddy already records its native Credit value. Do not turn an
-    # unrecognised model into a guessed dollar estimate; keep the Credit
-    # total authoritative and leave USD at zero until an exact price exists.
-    if model_id_first and not _exact_pricing_id(_model_identity_id(str(model))):
-        cost = 0.0
+            + cache_write / 1e6 * price["cache_write"]) if price else 0.0
     item_id = item.get("id") or provider.get("messageId") or ""
     return {
         "date": dt.date().isoformat(),
@@ -9531,7 +11224,71 @@ def _iter_workbuddy_records(file_cache):
         yield path, entry, record
 
 
+# 运行日志里每个请求都有：
+#   First meaningful token received: agent=…, requestId=<id>, ttft=<N>ms
+#   Stream completed: agent=…, requestId=<id>, chunks=…, bytes=…, elapsed=<N>ms
+# requestId 就是会话记录里的 providerData.messageId。两个时长都从发出请求算起。
+_WORKBUDDY_LOG_TTFT = re.compile(r"First meaningful token received: [^\n]*?requestId=([0-9a-f]+), ttft=(\d+)ms")
+_WORKBUDDY_LOG_DONE = re.compile(r"Stream completed: [^\n]*?requestId=([0-9a-f]+),[^\n]*?elapsed=(\d+)ms")
+_WORKBUDDY_TRIGGER = re.compile(
+    r'"type"\s*:\s*"function_call_result"|"role"\s*:\s*"user"')
+_WORKBUDDY_LINE_TIME = re.compile(r'"timestamp"\s*:\s*"?([0-9][0-9T:.+\-Z]*)"?')
+
+
+def _workbuddy_epoch(value):
+    """会话记录的 timestamp：毫秒字符串或 ISO。返回秒。"""
+    text = str(value or "").strip()
+    if text.isdigit():
+        number = int(text)
+        return number / 1000 if number > 10 ** 11 else float(number)
+    dt = parse_ts(text)
+    return dt.timestamp() if dt else None
+
+
+def _workbuddy_log_timing(cache, tool_key, root):
+    """requestId → (首字 ms, 流式总耗时 ms)。日志按文件签名缓存，没变的不重读。"""
+    log_root = os.path.join(os.path.dirname(root), "logs")
+    store = cache.setdefault(tool_key + "_logs", {})
+    files = (set(glob.glob(os.path.join(log_root, "**", "*.log"), recursive=True))
+             if os.path.isdir(log_root) else set())
+    for path in set(store) - files:
+        store.pop(path, None)
+        cache["_dirty"] = True
+    for path in files:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        sig = f"{st.st_mtime_ns}:{st.st_size}"
+        if isinstance(store.get(path), dict) and store[path].get("sig") == sig:
+            continue
+        ttft, done = {}, {}
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    if "requestId=" not in line:
+                        continue
+                    match = _WORKBUDDY_LOG_TTFT.search(line)
+                    if match:
+                        ttft[match.group(1)] = int(match.group(2))
+                        continue
+                    match = _WORKBUDDY_LOG_DONE.search(line)
+                    if match:
+                        done[match.group(1)] = int(match.group(2))
+        except OSError:
+            continue
+        store[path] = {"sig": sig, "timing": {rid: [ttft[rid], done[rid]]
+                                              for rid in ttft if rid in done}}
+        cache["_dirty"] = True
+    timing = {}
+    for entry in store.values():
+        timing.update(entry.get("timing") or {})
+    return timing
+
+
 def _scan_workbuddy_root(bounds, cache, root, tool_key):
+    if tool_key in _UNPRICED_COST_TOOLS:
+        _prepare_unpriced_cost_ledger(tool_key)
     ledger_touch(tool_key)
     fc = cache.setdefault(tool_key, {})
     B = _empty_token_ranges()
@@ -9553,10 +11310,15 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
         records = []
         project = None
         session_id = os.path.splitext(os.path.basename(path))[0]
+        trigger = None   # 最近一个用户消息 / 工具结果写入的时刻：下一次生成从这里开始
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as fh:
                 for line_no, line in enumerate(fh, 1):
                     if '"usage"' not in line and '"cwd"' not in line:
+                        head = line[:600]
+                        if _WORKBUDDY_TRIGGER.search(head):
+                            stamp = _WORKBUDDY_LINE_TIME.search(head)
+                            trigger = _workbuddy_epoch(stamp.group(1)) if stamp else trigger
                         continue
                     try:
                         item = json.loads(line)
@@ -9564,10 +11326,16 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
                         continue
                     project = item.get("cwd") or project
                     session_id = item.get("sessionId") or session_id
+                    if item.get("type") == "function_call_result" or (
+                            item.get("type") == "message" and item.get("role") == "user"):
+                        trigger = _workbuddy_epoch(item.get("timestamp")) or trigger
                     record = _workbuddy_usage_record(
                         item, model_id_first=tool_key == "codebuddy")
                     if record is None:
                         continue
+                    if trigger is not None and record.get("ts", 0) > trigger:
+                        record["e2e"] = round(record["ts"] - trigger, 3)
+                        trigger = None
                     record_session = str(item.get("sessionId") or session_id)
                     dedup_id = record.get("message_id") or record["item_id"]
                     if tool_key == "codebuddy" and record.get("message_id"):
@@ -9596,12 +11364,20 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
     ledger_sources = {}
     sessions = {}
     day_projects = {}
+    log_timing = _workbuddy_log_timing(cache, tool_key, root)
     for path, entry, record in _iter_workbuddy_records(fc):
-        _ledger_add_record_source(ledger_sources, record.get("session") or entry.get("sid") or path,
-                                  record["date"], record, record.get("hour"))
+        identity = record.get("session") or entry.get("sid") or path
+        _ledger_add_record_source(ledger_sources, identity, record["date"], record, record.get("hour"))
         day = days.setdefault(record["date"], _empty_token_day())
         _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
                          0, record["cost"], record["model"], credits=record.get("credits", 0))
+        # 运行日志里有精确的首字和总耗时就用它，日志被清掉了才退回会话记录的端到端
+        timing = log_timing.get(record.get("message_id") or "")
+        sample = ((timing[1] - timing[0]) / 1000, timing[0] / 1000) if timing \
+            else ((record["e2e"], None) if record.get("e2e") else None)
+        if sample:
+            for target in (day, ledger_sources[str(identity)][record["date"]]):
+                _perf_add(target.setdefault("perf", {}), record["model"], record["out"], *sample)
         sessions.setdefault(record["date"], set()).add(record.get("session") or "unknown")
         proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
         if proj_name:
@@ -9840,7 +11616,8 @@ def scan_grok_bot(bounds, cache):
 # ---------- DeepSeek Harness ----------
 # Harness 会为同一次调用写 usage chunk 和最终 message。按 session/turn/step
 # 只保留最终 message；异常中断时再用 usage chunk 兜底。
-_DEEPSEEK_HARNESS_COST_VERSION = 5
+# 7：经网关选路由组时按 replayState 里真正作答的模型归因。
+_DEEPSEEK_HARNESS_COST_VERSION = 7
 
 
 def _deepseek_harness_usage_record(item, fallback_model="", fallback_provider="deepseek-official"):
@@ -9862,6 +11639,13 @@ def _deepseek_harness_usage_record(item, fallback_model="", fallback_provider="d
         if isinstance(source, dict):
             model = source.get("model") or model
             provider = source.get("provider") or provider
+            # source.model 是「请求的」，经网关时可能是 group/<id>；真正作答的记在 replayState
+            replay = source.get("replayState") or source.get("replay_state")
+            response = replay.get("response") if isinstance(replay, dict) else None
+            served = (response.get("responseModel") or response.get("response_model")) \
+                if isinstance(response, dict) else None
+            if isinstance(served, str) and _names_model(served.strip()):
+                model = served.strip()
         priority = 2
     elif event_type == "assistant/chunk":
         chunk = data.get("chunk") or {}
@@ -9958,18 +11742,39 @@ def scan_deepseek_harness(bounds, cache):
         current_model = "deepseek-v4-pro"
         current_provider = "deepseek-official"
         candidates = {}
+        # 每个 step 的请求开始、第一个内容块、流结束时间（毫秒），重试时从重试那一刻重新算
+        timing = {}
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as handle:
                 for line in handle:
                     if '"type"' not in line or not any(value in line for value in (
-                            '"session"', '"request/header"',
-                            '"assistant/chunk"', '"assistant/message"')):
+                            '"session"', '"request/header"', '"step/start"',
+                            '"llm/retry-started"', '"assistant/chunk"', '"assistant/message"')):
                         continue
                     try:
                         item = json.loads(line)
                     except (TypeError, ValueError):
                         continue
                     event_type = item.get("type")
+                    if event_type in ("step/start", "llm/retry-started", "assistant/chunk"):
+                        data = item.get("data") or {}
+                        chunk = (data.get("chunk") or {}) if isinstance(data, dict) else {}
+                        kind = chunk.get("type") if isinstance(chunk, dict) else None
+                        moment = item.get("time")
+                        if (isinstance(data, dict) and isinstance(moment, (int, float))
+                                and (event_type != "assistant/chunk"
+                                     or kind in ("block-start", "finish"))):
+                            step_timing = timing.setdefault(
+                                (data.get("turn"), data.get("step")), {})
+                            if event_type != "assistant/chunk":
+                                step_timing.clear()
+                                step_timing["start"] = moment
+                            elif kind == "block-start":
+                                step_timing.setdefault("first", moment)
+                            else:
+                                step_timing["end"] = moment
+                        if event_type != "assistant/chunk" or kind != "usage":
+                            continue
                     if event_type == "session":
                         session_id = str(item.get("id") or session_id)
                         project = item.get("cwd") or project
@@ -9992,6 +11797,15 @@ def scan_deepseek_harness(bounds, cache):
                         candidates[key] = record
         except OSError:
             continue
+        for (turn, step), record in candidates.items():
+            step_timing = timing.get((turn, step)) or {}
+            start, first = step_timing.get("start"), step_timing.get("first")
+            end = step_timing.get("end") or record["ts"]
+            if start is not None and first is not None and start <= first <= end:
+                record["gen"] = (end - first) / 1000
+                record["ttft"] = (first - start) / 1000
+            elif start is not None and start < end:
+                record["gen"] = (end - start) / 1000
         records = sorted(candidates.values(), key=lambda record: record["ts"])
         fc[path] = {"sig": sig, "records": records, "proj": project, "sid": session_id,
                     "cost_version": _DEEPSEEK_HARNESS_COST_VERSION}
@@ -10013,6 +11827,10 @@ def scan_deepseek_harness(bounds, cache):
                          record["reason"], record["cost"], record["model"],
                          cost_cny=record.get("cost_cny", 0))
         day["hours"][record["hour"]] += token_total(record)
+        if record.get("gen"):
+            for target in (day, ledger_sources[str(entry.get("sid") or path)][record["date"]]):
+                _perf_add(target.setdefault("perf", {}), record["model"],
+                          record["out"] + record["reason"], record["gen"], record.get("ttft"))
         session = str(entry.get("sid") or "unknown")
         sessions.setdefault(record["date"], set()).add(session)
         project = entry.get("proj") or ""
@@ -10049,7 +11867,11 @@ def scan_deepseek_harness(bounds, cache):
 # SQLite: ~/.local/share/opencode/opencode.db；旧版 JSON 作为补充来源。
 # JSON 文件: ~/.local/share/opencode/storage/message/<session>/msg_*.json
 # 每条 assistant 消息有 tokens{input,output,reasoning,cache{read,write}} + cost + modelID。
-_OPENCODE_COST_CACHE_VERSION = 2
+# V2（session_message 表）的助手消息角色在行的 type 列，模型是 {id, providerID}
+# 引用，tokens / cost 与 V1 同形。迁移过来的历史两张表都有，同一条消息 ID 相同。
+# 4：数据库里的每一步附上计时（首字延迟、生成时间）。
+# 6：TTFT 改存细分桶直方图，取中位数。
+_OPENCODE_COST_CACHE_VERSION = 6
 
 
 def _opencode_db_paths():
@@ -10124,6 +11946,88 @@ def _opencode_message_day(message, session_id="", created_ms=0, estimate_missing
     return day
 
 
+def _opencode_v2_message(message, session_id):
+    """V2 助手消息转成 V1 的形状，交给同一个 _opencode_message_day 解析。"""
+    model = message.get("model")
+    converted = dict(message)
+    converted["role"] = "assistant"
+    converted["sessionID"] = message.get("sessionID") or session_id
+    if isinstance(model, dict):
+        converted["modelID"] = message.get("modelID") or model.get("id") or ""
+        converted["providerID"] = message.get("providerID") or model.get("providerID")
+    return converted
+
+
+def _opencode_database_messages(connection, tables):
+    """先读 V2，再用 V1 补 V2 里没有的消息：新消息只写 V2，旧消息两边都有。"""
+    if "session_message" in tables:
+        for message_id, session_id, created_ms, raw in connection.execute(
+                "SELECT id, session_id, time_created, data FROM session_message "
+                "WHERE type = 'assistant'"):
+            try:
+                message = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(message, dict):
+                yield message_id, session_id, created_ms, _opencode_v2_message(
+                    message, session_id or "")
+    if "message" in tables:
+        for message_id, session_id, created_ms, raw in connection.execute(
+                "SELECT id, session_id, time_created, data FROM message"):
+            try:
+                message = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(message, dict):
+                yield message_id, session_id, created_ms, message
+
+
+def _opencode_step_timing(connection, tables):
+    """message_id → [(生成秒, 首字秒, 输出 token)]，一步一个样本。
+
+    part 表里每一步依次是 step-start、reasoning / text（带 time.start / time.end）、
+    step-finish（带这一步的 token）。请求起点：第一步取消息创建时刻，后续步取上一步
+    结束时刻（中间是工具执行）。只用 json_extract 取这几个字段，不把正文读进内存。
+    """
+    import sqlite3
+    if "part" not in tables or "message" not in tables:
+        return {}
+    try:
+        created = {message_id: value for message_id, value in connection.execute(
+            "SELECT id, json_extract(data, '$.time.created') FROM message "
+            "WHERE json_extract(data, '$.role') = 'assistant'")}
+        rows = connection.execute("""
+            SELECT message_id, time_created, json_extract(data, '$.type'),
+                   json_extract(data, '$.time.start'),
+                   json_extract(data, '$.tokens.output'), json_extract(data, '$.tokens.reasoning')
+            FROM part
+            WHERE json_extract(data, '$.type') IN ('step-start', 'step-finish', 'reasoning', 'text')
+            ORDER BY message_id, time_created""").fetchall()
+    except sqlite3.Error:
+        return {}
+    timing = {}
+    current = request_start = first = None
+    for message_id, written, kind, started, output, reasoning in rows:
+        if message_id != current:
+            current, first = message_id, None
+            request_start = created.get(message_id)
+        if kind == "step-start":
+            first = None
+        elif kind in ("reasoning", "text"):
+            if isinstance(started, (int, float)) and (first is None or started < first):
+                first = started
+        elif kind == "step-finish" and isinstance(written, (int, float)):
+            tokens = int(output or 0) + int(reasoning or 0)
+            if first is not None and written > first:
+                ttft = ((first - request_start) / 1000
+                        if isinstance(request_start, (int, float)) and first >= request_start
+                        else None)
+                timing.setdefault(message_id, []).append(
+                    ((written - first) / 1000, ttft, tokens))
+            request_start, first = written, None
+    return timing
+
+
 def _scan_opencode_database(path, estimate_missing_cost=False):
     import sqlite3
 
@@ -10133,22 +12037,29 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
     connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
     try:
         connection.execute("PRAGMA query_only=ON")
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
         # 会话自带工作目录，让 OpenCode / MiMoCode 参与项目足迹与回顾页。
+        # 有的版本把会话放在 session_v2，一并读。
         session_projects = {}
-        session_columns = {row[1] for row in connection.execute("PRAGMA table_info(session)")}
-        if {"id", "directory"} <= session_columns:
+        for table in ("session", "session_v2"):
+            if table not in tables:
+                continue
+            session_columns = {row[1] for row in connection.execute(
+                f"PRAGMA table_info({table})")}
+            if not {"id", "directory"} <= session_columns:
+                continue
             try:
                 for session_id, directory in connection.execute(
-                        "SELECT id, directory FROM session"):
-                    if isinstance(directory, str) and directory.startswith("/"):
-                        session_projects[session_id] = directory
+                        f"SELECT id, directory FROM {table}"):
+                    if isinstance(directory, str) and _is_abs_project_path(directory):
+                        session_projects.setdefault(session_id, directory)
             except sqlite3.Error:
                 pass
-        rows = connection.execute("SELECT id, session_id, time_created, data FROM message")
-        for message_id, session_id, created_ms, raw in rows:
-            try:
-                message = json.loads(raw)
-            except (TypeError, ValueError):
+        step_timing = _opencode_step_timing(connection, tables)
+        for message_id, session_id, created_ms, message in _opencode_database_messages(
+                connection, tables):
+            if message_id and str(message_id) in message_ids:
                 continue
             day = _opencode_message_day(message, session_id or "", created_ms or 0,
                                         estimate_missing_cost=estimate_missing_cost)
@@ -10158,6 +12069,10 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
                 message_ids.add(str(message_id))
             day_key = day.pop("date")
             target = days.setdefault(day_key, _empty_token_day())
+            for gen, ttft, tokens in step_timing.get(message_id, ()):
+                _perf_add(target.setdefault("perf", {}),
+                          message.get("modelID") or (message.get("model") or {}).get("id"),
+                          tokens, gen, ttft)
             _add_token_usage(target, day["in"], day["out"], day["cr"], day["cw"],
                              day["reason"], day["cost"], cost_cny=day.get("cost_cny", 0))
             for model, usage in day["models"].items():
@@ -10363,6 +12278,10 @@ def _scan_zcode_database(path):
             day = days.setdefault(day_key, _empty_token_day())
             _add_token_usage(day, fresh_input, visible_output, cache_read, cache_write,
                              reasoning, cost, display_model)
+            # 每次调用的起止时刻（毫秒）：端到端速度，含首字等待
+            if number(completed_at) > number(started_at) > 0:
+                _perf_add(day.setdefault("perf", {}), display_model, output_total,
+                          (number(completed_at) - number(started_at)) / 1000)
             day["hours"][created.hour] += fresh_input + output_total + cache_read + cache_write
             sessions.setdefault(day_key, set()).add(str(session_id or row_id or "unknown"))
     finally:
@@ -10385,8 +12304,9 @@ def scan_zcode(bounds, cache):
     cache_key = "db:" + os.path.realpath(ZCODE_DB)
     signature = _sqlite_signature(ZCODE_DB)
     entry = fc.get(cache_key)
-    if not entry or entry.get("sig") != signature or entry.get("version") != 1:
-        entry = {"sig": signature, "days": _scan_zcode_database(ZCODE_DB), "version": 1}
+    # 2：附上每次调用的计时
+    if not entry or entry.get("sig") != signature or entry.get("version") != 2:
+        entry = {"sig": signature, "days": _scan_zcode_database(ZCODE_DB), "version": 2}
         fc.clear()
         fc[cache_key] = entry
         cache["_dirty"] = True
@@ -10417,7 +12337,9 @@ def scan_zcode(bounds, cache):
 # 计量口径版本。改动解析口径时 +1：账本按 _cost_version 取新不取大，
 # 否则被高水位规则记下的旧数（例如兄弟节点翻倍那版）会一直压住修正后的值。
 # 同一个常量也用作扫描缓存的版本，两边一起失效。
-_DEVIN_COST_VERSION = 3
+# 4：附上每次回复的计时（首字延迟、生成时间）。
+# 6：TTFT 改存细分桶直方图，取中位数。
+_DEVIN_COST_VERSION = 6
 
 
 def _devin_cli_db_path():
@@ -10457,7 +12379,7 @@ def _scan_devin_cli_database(path):
                             f"SELECT id, {model_col}, {directory} FROM sessions"):
                         if isinstance(model, str) and model.strip():
                             session_models[session_id] = model.strip()
-                        if isinstance(workdir, str) and workdir.startswith("/"):
+                        if isinstance(workdir, str) and _is_abs_project_path(workdir):
                             session_projects[session_id] = workdir
                 except sqlite3.Error:
                     pass
@@ -10544,6 +12466,12 @@ def _scan_devin_cli_database(path):
             day["_cost_version"] = _DEVIN_COST_VERSION
             _add_token_usage(day, input_total, output_total, cache_read, cache_write,
                              0, cost, display_model)
+            # Devin 自己记了首字延迟和总耗时（tokens_per_sec 正是按这两个算的）
+            ttft_ms = metrics.get("ttft_ms")
+            total_ms = metrics.get("total_time_ms")
+            if isinstance(ttft_ms, (int, float)) and isinstance(total_ms, (int, float)):
+                _perf_add(day.setdefault("perf", {}), display_model, output_total,
+                          (total_ms - ttft_ms) / 1000, ttft_ms / 1000)
             proj_path = session_projects.get(session_id)
             if proj_path:
                 by_project = day.setdefault("projects", {})
@@ -10599,6 +12527,345 @@ def scan_devin(bounds, cache):
     return {"ranges": B}
 
 
+# ---------- MiniMax Code ----------
+# 桌面端的本地运行时库：~/.minimax/v2/sqlite/runtime-state.sqlite。
+# local_runtime_token_usage 每轮对话一行，四个桶并列相加（raw 里的
+# totalTokens = input + output + cacheRead + cacheWrite），托管登录下
+# cost_usd 恒为 0。model 列目前是空的，真实模型只出现在按小时轮转的
+# observability 日志里：
+#
+#   llm_response_identifiers {"session_id":…,"turn_id":…,"model":"MiniMax-M3",…}
+#
+# 日志会被轮转删掉，所以对上号的结果按行号区间压缩存进扫描缓存（runs），
+# 日志没了模型也不丢；还没等到库里那一行的 turn 暂存在 pending 里。
+# 2：附上每轮回复的计时（首字延迟、生成时间）。
+_MINIMAX_SCAN_VERSION = 2
+_MINIMAX_LOG_MARKER = b"llm_response_identifiers"
+_MINIMAX_PENDING_TTL = 2 * 24 * 3600
+
+
+def _minimax_db_path():
+    return _first_existing_file(MINIMAX_DB_PATHS)
+
+
+def _minimax_log_dir(db_path):
+    return os.path.join(os.path.dirname(os.path.dirname(db_path)), "observability", "logs")
+
+
+def _minimax_read_turn_models(log_dir, offsets, pending, now=None):
+    """增量读日志，把 turn_id → 模型记进 pending。返回新认识的 turn 数。
+
+    offsets 是 {文件名: 已读到的字节}；文件变短说明被重写，从头再读。
+    半行留到下一轮，避免把正在写的那行读成坏 JSON。
+    """
+    now = int(now if now is not None else _time.time())
+    try:
+        names = {name for name in os.listdir(log_dir) if name.endswith(".log")}
+    except OSError:
+        names = set()
+    for name in [name for name in offsets if name not in names]:
+        del offsets[name]
+    learned = 0
+    for name in sorted(names):
+        path = os.path.join(log_dir, name)
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        offset = offsets.get(name)
+        offset = offset if isinstance(offset, int) and 0 <= offset <= size else 0
+        if offset == size:
+            offsets[name] = offset
+            continue
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(offset)
+                for line in handle:
+                    if not line.endswith(b"\n"):
+                        break
+                    offset += len(line)
+                    marker = line.find(_MINIMAX_LOG_MARKER)
+                    if marker < 0:
+                        continue
+                    start = line.find(b"{", marker)
+                    try:
+                        record = json.loads(line[start:].decode("utf-8")) if start >= 0 else None
+                    except (UnicodeDecodeError, ValueError):
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    turn_id, model = record.get("turn_id"), record.get("model")
+                    if isinstance(turn_id, str) and turn_id \
+                            and isinstance(model, str) and model.strip():
+                        pending[turn_id] = [model.strip(), now]
+                        learned += 1
+        except OSError:
+            continue
+        offsets[name] = offset
+    return learned
+
+
+def _minimax_project_path(workdir, is_default):
+    """会话的工作目录才算项目；应用自己管的目录（每个会话的临时 workspace、
+    ~/.minimax-agent-cn/projects 这类默认根）不算。"""
+    if is_default or not isinstance(workdir, str) or not os.path.isabs(workdir):
+        return None
+    try:
+        relative = os.path.relpath(workdir, HOME)
+    except ValueError:
+        return workdir
+    if relative.split(os.sep)[0].startswith(".minimax"):
+        return None
+    return workdir
+
+
+def _minimax_run_lookup(runs, through):
+    import bisect
+    starts = [start for start, _ in runs]
+
+    def lookup(row_id):
+        if row_id > through:
+            return None
+        index = bisect.bisect_right(starts, row_id) - 1
+        return runs[index][1] if index >= 0 else None
+    return lookup
+
+
+def _minimax_turn_timing(connection, tables):
+    """turn_id → (回复写入时刻 ms, 生成耗时 ms, 请求总耗时 ms)。
+
+    只认一轮里只有一条助手回复的：一轮里调了好几次模型（中间夹着工具），
+    用量是整轮合计，拿写入时刻减请求时刻会把工具时间也算进去。
+    """
+    import sqlite3
+    if "local_runtime_message_rows" not in tables:
+        return {}
+    columns = {row[1] for row in connection.execute(
+        "PRAGMA table_info(local_runtime_message_rows)")}
+    if not {"role", "turn_id", "created_at_ms", "data_json"} <= columns:
+        return {}
+    timing, counts = {}, {}
+    try:
+        for turn_id, created_ms, decode_ms, request_ms in connection.execute("""
+                SELECT turn_id, created_at_ms,
+                       json_extract(data_json, '$.usage.decode_duration_ms'),
+                       json_extract(data_json, '$.usage.request_duration_ms')
+                FROM local_runtime_message_rows WHERE role = 'assistant'"""):
+            if not turn_id:
+                continue
+            counts[turn_id] = counts.get(turn_id, 0) + 1
+            timing[turn_id] = (created_ms if isinstance(created_ms, (int, float)) else None,
+                               decode_ms if isinstance(decode_ms, (int, float)) else None,
+                               request_ms if isinstance(request_ms, (int, float)) else None)
+    except sqlite3.Error:
+        return {}
+    return {turn: value for turn, value in timing.items() if counts[turn] == 1}
+
+
+def _scan_minimax_database(path, pending, runs, through):
+    """返回 (days, 新的 runs, 新的 through, 本轮对上的 turn_id)。"""
+    import sqlite3
+
+    def number(value):
+        try:
+            return max(int(value or 0), 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "local_runtime_token_usage" not in tables:
+            return {}, [], 0, set()
+        columns = {row[1] for row in connection.execute(
+            "PRAGMA table_info(local_runtime_token_usage)")}
+        if not {"id", "session_id", "ts", "input_tokens", "output_tokens"} <= columns:
+            return {}, [], 0, set()
+
+        def column(name):
+            return name if name in columns else "NULL"
+
+        session_projects = {}
+        if "local_runtime_sessions" in tables:
+            session_columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(local_runtime_sessions)")}
+            workdir = next((name for name in ("project_workspace_dir", "workspace_dir")
+                            if name in session_columns), None)
+            if workdir:
+                default = "is_default_workspace" \
+                    if "is_default_workspace" in session_columns else "0"
+                try:
+                    for session_id, directory, is_default in connection.execute(
+                            f"SELECT session_id, {workdir}, {default} "
+                            "FROM local_runtime_sessions"):
+                        project = _minimax_project_path(directory, is_default)
+                        if project:
+                            session_projects[session_id] = project
+                except sqlite3.Error:
+                    pass
+
+        rows = connection.execute(f"""
+            SELECT id, session_id, {column("turn_id")}, {column("model")}, ts,
+                   input_tokens, output_tokens, {column("reasoning_tokens")},
+                   {column("cache_read_tokens")}, {column("cache_write_tokens")},
+                   {column("raw")}
+            FROM local_runtime_token_usage
+            ORDER BY id ASC
+        """).fetchall()
+        turn_timing = _minimax_turn_timing(connection, tables)
+    finally:
+        connection.close()
+
+    # 库被重建过（行号从头再来）时，旧的行号区间不再对应同一批行。
+    if rows and rows[-1][0] < through:
+        runs, through = [], 0
+    known = _minimax_run_lookup(runs, through)
+    matched = set()
+    evidence = []
+    for row in rows:
+        row_id, session_id, turn_id, model = row[0], row[1], row[2], row[3]
+        model = model.strip() if isinstance(model, str) and model.strip() else None
+        if not model and isinstance(turn_id, str) and turn_id in pending:
+            model = pending[turn_id][0]
+            matched.add(turn_id)
+        evidence.append(model or known(row_id))
+
+    # 同一会话里其余轮次的模型给缺失的那几轮兜底；只用于本轮展示，
+    # 不写回 runs，免得猜测被当成证据固化下来。
+    session_models = {}
+    for row, model in zip(rows, evidence):
+        if model:
+            counts = session_models.setdefault(row[1], {})
+            counts[model] = counts.get(model, 0) + 1
+
+    days, sessions = {}, {}
+    for row, model in zip(rows, evidence):
+        _, session_id, _, _, ts, inp, out, reasoning, cache_read, cache_write, raw = row
+        inp, out, cache_read, cache_write = (
+            number(inp), number(out), number(cache_read), number(cache_write))
+        # 思考 token 是否已含在 output 里，以 raw 的 totalTokens 为准；对不上就不计，
+        # 宁可少算这一桶也不重复计。
+        reason = number(reasoning)
+        if reason:
+            try:
+                total_tokens = number(json.loads(raw).get("totalTokens"))
+            except (TypeError, ValueError, AttributeError):
+                total_tokens = 0
+            if total_tokens != inp + out + cache_read + cache_write + reason:
+                reason = 0
+        total = inp + out + cache_read + cache_write + reason
+        if total <= 0:
+            continue
+        stamp = _provider_epoch(ts)
+        if stamp is None:
+            continue
+        try:
+            created = datetime.fromtimestamp(stamp).astimezone()
+        except (OSError, OverflowError, ValueError):
+            continue
+        if not model:
+            counts = session_models.get(session_id)
+            model = max(counts, key=counts.get) if counts else None
+        display_model = (_known_id_or_raw(model) or model) if model else "minimax"
+        cost = 0.0
+        price_id = _pricing_id(model) if model else None
+        if price_id:
+            price = _raw_price(price_id)
+            cost = (inp / 1e6 * price["in"] + (out + reason) / 1e6 * price["out"]
+                    + cache_read / 1e6 * price["cache_read"]
+                    + cache_write / 1e6 * price["cache_write"])
+
+        day_key = created.date().isoformat()
+        day = days.setdefault(day_key, _empty_token_day())
+        day["_cost_version"] = _MINIMAX_SCAN_VERSION
+        _add_token_usage(day, inp, out, cache_read, cache_write, reason, cost, display_model)
+        timing = turn_timing.get(row[2])
+        if timing:
+            end_ms, decode_ms, request_ms = timing
+            if decode_ms and request_ms and request_ms >= decode_ms:
+                # 新版客户端直接记了生成耗时和请求总耗时
+                _perf_add(day.setdefault("perf", {}), display_model, out + reason,
+                          decode_ms / 1000, (request_ms - decode_ms) / 1000)
+            elif end_ms and isinstance(ts, (int, float)) and end_ms > ts:
+                # 旧版只有回复写入时间：从用量行的请求时刻算起，端到端
+                _perf_add(day.setdefault("perf", {}), display_model, out + reason,
+                          (end_ms - ts) / 1000)
+        project = session_projects.get(session_id)
+        if project:
+            bucket = day.setdefault("projects", {}).setdefault(
+                project, {"tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
+            bucket["tokens"] += total
+            bucket["cost"] += cost
+            bucket["models"][display_model] = bucket["models"].get(display_model, 0) + total
+            if session_id not in bucket["sessions"]:
+                bucket["sessions"].append(str(session_id))
+        day["hours"][created.hour] += total
+        sessions.setdefault(day_key, set()).add(str(session_id or "unknown"))
+    for day_key, session_ids in sessions.items():
+        days[day_key]["sessions"] = sorted(session_ids)
+
+    new_runs = []
+    for row, model in zip(rows, evidence):
+        if not new_runs or new_runs[-1][1] != model:
+            new_runs.append([row[0], model])
+    return days, new_runs, (rows[-1][0] if rows else 0), matched
+
+
+def scan_minimax(bounds, cache):
+    ledger_touch("minimax")
+    fc = cache.setdefault("minimax", {})
+    B = _empty_token_ranges()
+    db_path = _minimax_db_path()
+    if not db_path:
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
+        return {"ranges": B}
+
+    db_path = os.path.realpath(db_path)
+    cache_key = "db:" + db_path
+    entry = fc.get(cache_key)
+    if not isinstance(entry, dict) or entry.get("version") != _MINIMAX_SCAN_VERSION:
+        previous = entry if isinstance(entry, dict) else {}
+        # 口径升级只作废计算结果；runs 是从已轮转掉的日志里攒下来的证据，要留着。
+        entry = {"version": _MINIMAX_SCAN_VERSION, "logs": {}, "pending": {},
+                 "runs": previous.get("runs") or [], "through": previous.get("through") or 0}
+        fc.clear()
+        fc[cache_key] = entry
+        cache["_dirty"] = True
+
+    offsets, pending = entry.setdefault("logs", {}), entry.setdefault("pending", {})
+    before = dict(offsets)
+    learned = _minimax_read_turn_models(_minimax_log_dir(db_path), offsets, pending)
+    if offsets != before:
+        cache["_dirty"] = True
+
+    signature = _sqlite_signature(db_path)
+    if learned or "days" not in entry or entry.get("sig") != signature:
+        days, runs, through, matched = _scan_minimax_database(
+            db_path, pending, entry.get("runs") or [], entry.get("through") or 0)
+        horizon = int(_time.time()) - _MINIMAX_PENDING_TTL
+        for turn_id in [turn_id for turn_id, value in pending.items()
+                        if turn_id in matched or not isinstance(value, list)
+                        or len(value) != 2 or not isinstance(value[1], int)
+                        or value[1] < horizon]:
+            del pending[turn_id]
+        entry.update({"sig": signature, "days": days, "runs": runs, "through": through})
+        cache["_dirty"] = True
+
+    for day_key, day in ledger_reconcile("minimax", entry.get("days", {})).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
+    return {"ranges": B}
+
+
 # ---------- MiMoCode ----------
 # MiMoCode uses the OpenCode message schema and XDG data-directory rules.
 def _mimocode_data_dirs():
@@ -10637,7 +12904,9 @@ def _mimocode_db_paths():
 
 
 # 解析口径版本。加 1 可让旧缓存失效重扫（例如新增了按项目的用量拆分）。
-_MIMOCODE_SCAN_VERSION = 2
+# 3：数据库里的每一步附上计时（首字延迟、生成时间）。
+# 5：TTFT 改存细分桶直方图，取中位数。
+_MIMOCODE_SCAN_VERSION = 5
 
 
 def scan_mimocode(bounds, cache):
@@ -10735,9 +13004,11 @@ def _qwen_usage_parts(model, values):
     inp = max(input_total - cached, 0)
     out = _qwen_number(values.get("outputTokens"))
     reason = _qwen_number(values.get("thoughtsTokens"))
-    price = _raw_price(model)
+    # 没有公开价的模型不估美元（以前落到 Opus 兜底价）
+    price_id = _pricing_id(model)
+    price = _raw_price(price_id) if price_id else None
     cost = ((inp * price["in"] + cached * price["cache_read"]
-             + (out + reason) * price["out"]) / 1e6)
+             + (out + reason) * price["out"]) / 1e6) if price else 0.0
     return inp, out, cached, reason, cost
 
 
@@ -10763,7 +13034,7 @@ def _qwen_request_entry(record):
     inp, out, cached, reason, cost = _qwen_usage_parts(model, record)
     models = {}
     _add_model_usage(models, model, inp, out, cached, 0, reason, cost)
-    return {
+    entry = {
         "date": day_str,
         "hour": dt.hour if dt else None,
         "in": inp,
@@ -10775,6 +13046,12 @@ def _qwen_request_entry(record):
         "session": session,
         "models": models,
     }
+    # 这次 API 调用的总耗时：端到端速度，含首字等待
+    duration = _qwen_number(record.get("apiDurationMs"))
+    if duration > 0:
+        entry["gen"] = round(duration / 1000, 3)
+        entry["model"] = model
+    return entry
 
 
 def _qwen_summary_entry(record):
@@ -10924,6 +13201,7 @@ def _qwen_source_signature(paths):
 
 
 def scan_qwencode(bounds, cache):
+    _prepare_unpriced_cost_ledger("qwencode")
     ledger_touch("qwencode")
     fc = cache.setdefault("qwencode", {})
     B = _empty_token_ranges()
@@ -10937,10 +13215,12 @@ def scan_qwencode(bounds, cache):
             cache["_dirty"] = True
         return {"ranges": B}
 
-    if fc.get("sig") != sig or fc.get("accounting_version") != 2:
+    # 3：没有公开价的模型不再按 Opus 兜底价估美元；4：不带厂商前缀的模型名按名字查价；
+    # 5：没有的沿用上一个版本的价；6：附上每次调用的计时
+    if fc.get("sig") != sig or fc.get("accounting_version") != 6:
         entries = _qwen_entries(token_files, summary_file)
         fc.clear()
-        fc.update({"sig": sig, "entries": entries, "accounting_version": 2})
+        fc.update({"sig": sig, "entries": entries, "accounting_version": 6})
         cache["_dirty"] = True
 
     live_days = {}
@@ -10950,10 +13230,16 @@ def scan_qwencode(bounds, cache):
             day = date.fromisoformat(entry["date"])
         except (TypeError, ValueError, KeyError):
             continue
-        _ledger_add_record_source(ledger_sources, entry.get("session") or "unknown", entry["date"], entry, entry.get("hour"))
+        identity = entry.get("session") or "unknown"
+        _ledger_add_record_source(ledger_sources, identity, entry["date"], entry, entry.get("hour"))
         agg = live_days.setdefault(entry["date"], _empty_token_day())
         _add_token_usage(agg, entry.get("in", 0), entry.get("out", 0), entry.get("cr", 0),
                          entry.get("cw", 0), entry.get("reason", 0), entry.get("cost", 0))
+        if entry.get("gen"):
+            for target in (agg, ledger_sources[str(identity)][entry["date"]]):
+                _perf_add(target.setdefault("perf", {}), entry.get("model"),
+                          int(entry.get("out", 0) or 0) + int(entry.get("reason", 0) or 0),
+                          entry["gen"])
         for model, mv in (entry.get("models") or {}).items():
             _add_model_usage(agg["models"], model, mv.get("in", 0), mv.get("out", 0),
                              mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0),
@@ -11628,7 +13914,8 @@ def scan_kimicode(bounds, cache):
 #   payload.kind=run 且 event.kind=model_completed → event.usage + event.model(用量事件)
 # input_tokens 含 cached(与 Codex 同口径):输入=input-cached,缓存读=cached,推理视为输出子集。
 # 日志不持久化成本,按价格表估算(muse-* → meta/muse-*,见 _normalize)。
-_MUSE_PARSER_VERSION = 1
+# 2：附上每次模型调用的计时。
+_MUSE_PARSER_VERSION = 2
 _MUSE_SESSION_PATTERNS = (
     os.path.join("sessions", "*", "*", "*", "*", "session.jsonl"),
     os.path.join("sessions", "*", "session.jsonl"),
@@ -11784,6 +14071,11 @@ def _scan_muse_session(path):
                     continue
                 day = days.setdefault(dt.date().isoformat(), _empty_token_day())
                 _add_token_usage(day, inp, out, cached, cw, reason, cost, display_model)
+                # 这次模型调用的耗时：端到端速度，含首字等待
+                duration = _muse_number(event.get("duration_ms"))
+                if duration > 0:
+                    _perf_add(day.setdefault("perf", {}), display_model, out + reason,
+                              duration / 1000)
                 day["hours"][dt.hour] += inp + out + cached + cw
     except OSError:
         return {}, sid, proj
@@ -12185,12 +14477,16 @@ def _zstd_decompress(data):
 
 
 # 首次全量定位 /usage，之后只检查变化项并复用最近一次有效候选。
-_CLAUDE_QUOTA_STATE_VERSION = 2
+_CLAUDE_QUOTA_STATE_VERSION = 3
 _CLAUDE_QUOTA_STALE_TTL = 1800
 _CLAUDE_QUOTA_FULL_SCAN_INTERVAL = 6 * 3600
 _CLAUDE_QUOTA_RETRY_SCAN_INTERVAL = 5 * 60
 _CLAUDE_CACHE_FILE_LIMIT = 16 * 1024 * 1024
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+# 修改时间晚于「现在 + 5 分钟」的缓存文件不可信（实机见过 2037 年的残留）：
+# 一旦记成水位线，真正的新文件永远比它旧，增量扫描就此失效且无法自愈。
+# 这类文件当作还不存在，不解析也不参与水位线；等时间真走到它，再按普通文件处理。
+_CLAUDE_QUOTA_FUTURE_SKEW = 5 * 60
 
 
 def _claude_record_signature(record):
@@ -12319,7 +14615,9 @@ def _claude_quota_from_environment(now=None):
 def _scan_claude_plan_raw(now=None):
     import time
     now = int(time.time()) if now is None else int(now)
-    records = _claude_cache_records()
+    horizon_ns = (now + _CLAUDE_QUOTA_FUTURE_SKEW) * 1_000_000_000
+    records = [record for record in _claude_cache_records()
+               if record["mtime_ns"] <= horizon_ns]
     records_by_path = {record["path"]: record for record in records}
     original = _load_claude_quota_state()
     state = dict(original)
@@ -12423,9 +14721,12 @@ def compute():
     qd = _safe_scan("qoderwork", lambda: scan_qoder(bounds, cache), _empty_qoder, errors)
     qi = _safe_scan("qoder_ide", lambda: scan_qoder_ide(bounds, cache), _empty_qoder_ide, errors)
     qcli = _safe_scan("qodercli", lambda: scan_qodercli(bounds, cache), _empty_qodercli, errors)
+    qcli_cn = _safe_scan("qodercli_cn", lambda: scan_qodercli(bounds, cache, tool="qodercli_cn"),
+                         _empty_qodercli, errors)
     hm = _safe_scan("hermes", lambda: scan_hermes(bounds, cache), _empty_hermes, errors)
     zc = _safe_scan("zcode", lambda: scan_zcode(bounds, cache), _empty_zcode, errors)
     dv = _safe_scan("devin", lambda: scan_devin(bounds, cache), _empty_devin, errors)
+    mm = _safe_scan("minimax", lambda: scan_minimax(bounds, cache), _empty_minimax, errors)
     mc = _safe_scan("mimocode", lambda: scan_mimocode(bounds, cache), _empty_mimocode, errors)
     oc = _safe_scan("openclaw", lambda: scan_openclaw(bounds, cache), _empty_openclaw, errors)
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
@@ -12464,17 +14765,19 @@ def compute():
             p = price_for(n)
             models.append({"name": nice_model(n), "in": v["in"], "out": v["out"],
                            "cr": v["cr"], "cw": v["cw"], "cost": v["cost"],
-                           "pin": p["in"], "pout": p["out"]})
+                           "pin": p["in"], "pout": p["out"], "pcr": p["cache_read"]})
         return {"hit": hit, "in": b["in"], "out": b["out"],
                 "cr": b["cr"], "cw": b["cw"], "cost": b["cost"], "models": models,
-                "sessions": len(b["sessions"])}
+                "sessions": len(b["sessions"]), "perf": _perf_summary(b.get("perf"), name=nice_model)}
 
     def codex_range(b):
         b = b or {}
         hit = (b.get("cached", 0) / b["in"] * 100) if b.get("in") else 0.0
         return {"hit": hit, "in": b.get("in", 0) - b.get("cached", 0), "cached": b.get("cached", 0),
                 "out": b.get("out", 0), "reason": b.get("reason", 0), "cost": b.get("cost", 0.0),
-                "sessions": len(b.get("sessions", set())), "models": _format_token_models(b.get("models", {}))}
+                "sessions": len(b.get("sessions", set())),
+                "models": _format_token_models(b.get("models", {}), price_model=_codex_price_model),
+                "perf": _perf_summary(b.get("perf"))}
 
     def gemini_range(b):
         # tokens.input 含 cached,展示口径与 Codex 一致:输入=非缓存部分
@@ -12484,10 +14787,12 @@ def compute():
             p = gemini_price(n)
             models.append({"name": nice_model(n), "in": max(v["in"] - v["cached"], 0),
                            "out": v["out"], "cached": v["cached"], "thoughts": v["thoughts"],
-                           "cost": v["cost"], "pin": p["in"], "pout": p["out"]})
+                           "cost": v["cost"], "pin": p["in"], "pout": p["out"],
+                           "pcr": p["cache_read"]})
         return {"hit": hit, "in": max(b["in"] - b["cached"], 0), "out": b["out"],
                 "cached": b["cached"], "thoughts": b["thoughts"], "cost": b["cost"],
-                "models": models, "sessions": len(b["sessions"])}
+                "models": models, "sessions": len(b["sessions"]),
+                "perf": _perf_summary(b.get("perf"), name=nice_model)}
 
     def grok_range(b):
         latency_count = b.get("latency_count", 0)
@@ -12502,6 +14807,7 @@ def compute():
                 "cr": b.get("cr", 0), "reason": b.get("reason", 0),
                 "cost": b.get("cost", 0.0),
                 "models": _format_token_models(b.get("models", {}), include_prices=True),
+                "perf": _perf_summary(b.get("perf")),
                 "usage_available": usage_available,
                 "usage_calls": b.get("usage_calls", 0),
                 "usage_sessions": len(b.get("usage_sessions", [])),
@@ -12554,17 +14860,19 @@ def compute():
             "models": _format_token_models(b.get("models", {}), include_prices=False),
             "tools": b.get("tools", 0),
             "est": int(b.get("est", 0)),
+            "perf": _perf_summary(b.get("perf")),
         })
         return r
 
     qcliranges = {k: qodercli_range(qcli["ranges"][k]) for k in RANGE_KEYS}
+    qclicnranges = {k: qodercli_range(qcli_cn["ranges"][k]) for k in RANGE_KEYS}
 
     def hermes_range(b):
         denom = b["cr"] + b["cw"] + b["in"]
         hit = (b["cr"] / denom * 100) if denom else 0.0
         return {"hit": hit, "in": b["in"], "out": b["out"], "cr": b["cr"], "cw": b["cw"],
                 "reason": b["reason"], "cost": b["cost"], "sessions": b["sessions"],
-                "models": _format_token_models(b["models"])}
+                "models": _format_token_models(b["models"]), "perf": _perf_summary(b.get("perf"))}
 
     def openclaw_range(b):
         denom = b["cr"] + b["cw"] + b["in"]
@@ -12572,7 +14880,7 @@ def compute():
         return {"tasks": b["tasks"], "completed": b["completed"], "failed": b["failed"],
                 "hit": hit, "in": b["in"], "out": b["out"], "cr": b["cr"], "cw": b["cw"],
                 "reason": b["reason"], "cost": b["cost"], "sessions": len(b["sessions"]),
-                "models": _format_token_models(b["models"])}
+                "models": _format_token_models(b["models"]), "perf": _perf_summary(b.get("perf"))}
 
     hranges = {k: hermes_range(hm["ranges"][k]) for k in RANGE_KEYS}
     oranges = {k: openclaw_range(oc["ranges"][k]) for k in RANGE_KEYS}
@@ -12583,12 +14891,13 @@ def compute():
         return {"hit": hit, "in": b["in"], "out": b["out"], "cr": b["cr"], "cw": b["cw"],
                 "reason": b["reason"], "cost": b["cost"], "cost_cny": b.get("cost_cny", 0),
                 "credits": b.get("credits", 0.0), "sessions": len(b["sessions"]),
-                "models": _format_token_models(b["models"])}
+                "models": _format_token_models(b["models"]), "perf": _perf_summary(b.get("perf"))}
 
     piranges = {k: token_usage_range(pi["ranges"][k]) for k in RANGE_KEYS}
     paranges = {k: token_usage_range(prime["ranges"][k]) for k in RANGE_KEYS}
     zcranges = {k: token_usage_range(zc["ranges"][k]) for k in RANGE_KEYS}
     dvranges = {k: token_usage_range(dv["ranges"][k]) for k in RANGE_KEYS}
+    mmranges = {k: token_usage_range(mm["ranges"][k]) for k in RANGE_KEYS}
     mcranges = {k: token_usage_range(mc["ranges"][k]) for k in RANGE_KEYS}
     wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
     wbairanges = {k: token_usage_range(wbai["ranges"][k]) for k in RANGE_KEYS}
@@ -12680,6 +14989,10 @@ def compute():
             "ranges": dvranges,
             "quota": provider_quotas["devin"],
         },
+        "minimax": {
+            "ranges": mmranges,
+            "quota": provider_quotas["minimax"],
+        },
         "cursor": provider_quotas["cursor"],
         "zed": provider_quotas["zed"],
         "sub2api": provider_quotas["sub2api"],
@@ -12695,6 +15008,7 @@ def compute():
             "source": grok_quota.get("source"),
             "q_updated": grok_quota.get("updated"),
             "stale": grok_quota.get("stale"),
+            "auth_expired": bool(grok_quota.get("auth_expired")),
         },
         "grok_bot": {
             "ranges": grok_bot_ranges,
@@ -12712,6 +15026,10 @@ def compute():
         "qodercli": {
             "ranges": qcliranges,
             "model": qcli.get("model"),
+        },
+        "qodercli_cn": {
+            "ranges": qclicnranges,
+            "model": qcli_cn.get("model"),
         },
         "hermes": {
             "ranges": hranges,
@@ -12774,7 +15092,7 @@ def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
     for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy",
                      "workbuddy_ai", "codebuddy",
-                     "deepseek_harness", "qwencode", "devin"):
+                     "deepseek_harness", "qwencode", "devin", "minimax"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -12787,14 +15105,19 @@ def _recalc_costs(result):
             for m in r["models"]:
                 name = m.get("name", "")
                 model_id = m.get("model_id")
-                price_id = (_exact_pricing_id(model_id) if isinstance(model_id, str) else None)
+                price_id = (_pricing_id(model_id) if isinstance(model_id, str) else None)
                 if not price_id:
                     price_id = _pricing_id(name)
+                # 单价借自别的模型（沿用上一个版本 / 家族代表）时注明参照
+                identity = model_id if isinstance(model_id, str) else _model_identity_id(name)
+                m["pref"] = (nice_model(price_id)
+                             if price_id and _model_identity_id(price_id) != identity else None)
                 authoritative_cost = float(m.get("cost", 0) or 0)
                 if tool_key == "deepseek_harness":
                     total_cost += authoritative_cost
                     m["pin"] = 0
                     m["pout"] = 0
+                    m["pcr"] = 0
                     continue
                 if tool_key == "hermes" and authoritative_cost:
                     total_cost += authoritative_cost
@@ -12802,11 +15125,13 @@ def _recalc_costs(result):
                         price = _raw_price(price_id)
                         m["pin"] = price["in"]
                         m["pout"] = price["out"]
+                        m["pcr"] = price["cache_read"]
                     continue
                 if not price_id:
                     total_cost += authoritative_cost
                     m["pin"] = 0
                     m["pout"] = 0
+                    m["pcr"] = 0
                     continue
                 p = _raw_price(price_id)
                 ti = m.get("in", 0)
@@ -12825,7 +15150,7 @@ def _recalc_costs(result):
                     cost = authoritative_cost or (
                         ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
                         + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
-                elif tool_key in ("hermes", "zcode", "mimocode", "devin"):
+                elif tool_key in ("hermes", "zcode", "mimocode", "devin", "minimax"):
                     cr = m.get("cr", 0)
                     cw = m.get("cw", 0)
                     reason = m.get("reason", 0)
@@ -12851,6 +15176,9 @@ def _recalc_costs(result):
                 m["cost"] = round(cost, 6)
                 m["pin"] = p["in"]
                 m["pout"] = p["out"]
+                # 缓存读往往占 Token 的绝大部分，单价标签得把它也写出来，否则按
+                # 输入 / 输出价比较两个模型会得出反直觉的结论。
+                m["pcr"] = p.get("cache_read", 0)
                 total_cost += cost
             r["cost"] = round(total_cost, 6)
 
@@ -12860,7 +15188,7 @@ _TOKEI_CONFIG = os.path.join(HOME, ".tokei", "config.json")
 
 def _load_tokei_config():
     try:
-        with open(_TOKEI_CONFIG) as f:
+        with open(_TOKEI_CONFIG, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
@@ -12921,6 +15249,14 @@ def _sync_safe_usage_payload(payload):
     # contain an email/login label. Keep them in the local cache only.
     for key in ("cursor", "zed", "sub2api", "zai", "antigravity"):
         snapshot.pop(key, None)
+    # Devin / MiniMax Code 把 token 与账号额度放在同一个键下：token 要同步，
+    # 额度（Devin 的那行带着登录邮箱）同样只留在本机。
+    for key in ("devin", "minimax"):
+        tool = snapshot.get(key)
+        if isinstance(tool, dict) and "quota" in tool:
+            tool = dict(tool)
+            tool.pop("quota", None)
+            snapshot[key] = tool
     kimi = snapshot.get("kimicode")
     if isinstance(kimi, dict):
         kimi = dict(kimi)
@@ -13302,7 +15638,7 @@ def _scan_local_models():
                             o = json.loads(line)
                             msg = o.get("message") or {}
                             if msg.get("role") == "assistant":
-                                models.add(_pi_model_id(msg))
+                                models.add(_served_identity(_pi_served_model(msg), _pi_model_id(msg)))
                         except Exception:
                             pass
             except OSError:
@@ -13429,10 +15765,7 @@ def update_unknown():
     with open(OVERRIDES_FILE, "w", encoding="utf-8") as f:
         json.dump(ovr, f, ensure_ascii=False, indent=2)
     if added:
-        try:
-            os.remove(_SCAN_CACHE_FILE)
-        except OSError:
-            pass
+        _remove_scan_cache_files()
         _remove_codex_event_cache_dir()
 
     result = {"status": "ok", "count": len(added), "added": added}
@@ -13516,7 +15849,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
 
     _empty = lambda: {"claude": 0.0, "codex": 0.0, "codex_reserve": 0.0,
                        "gemini": 0.0, "grok": 0.0,
-                       "zcode": 0.0, "mimocode": 0.0, "devin": 0.0, "pi": 0.0,
+                       "zcode": 0.0, "mimocode": 0.0, "devin": 0.0, "minimax": 0.0,
+                       "pi": 0.0,
                        "workbuddy": 0.0, "workbuddy_ai": 0.0, "codebuddy": 0.0,
                        "deepseek_harness": 0.0,
                        "opencode": 0.0, "qwencode": 0.0, "kimicode": 0.0,
@@ -13681,7 +16015,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 m[key] += mv.get(key, 0)
 
     for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode"),
-                             ("devin", "Devin")):
+                             ("devin", "Devin"), ("minimax", "MiniMax Code")):
         for dk, day_data in _iter_cached_token_days(cache.get(tool_key, {})):
             if cutoff and dk < cutoff:
                 continue
@@ -13875,18 +16209,19 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             m["out"] += output
             m["cr"] += cached
 
-    for dk, day in _qodercli_usage_days(cache.get("qodercli", {})).items():
-        if cutoff and dk < cutoff:
-            continue
-        d = days.setdefault(dk, _empty())
-        _add_day_tokens(d, dk, "qodercli", token_total(day))
-        for model_name, usage in day.get("models", {}).items():
-            name = f"{nice_model(model_name)} (Qoder CLI)"
-            model = models.setdefault(
-                name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
-                       "reason": 0, "tool": "qodercli"})
-            for field in ("in", "out", "cr", "cw"):
-                model[field] += int(usage.get(field, 0) or 0)
+    for qcli_tool, (_root, _env, qcli_label) in _QODERCLI_DIRS.items():
+        for dk, day in _qodercli_usage_days(cache.get(qcli_tool, {})).items():
+            if cutoff and dk < cutoff:
+                continue
+            d = days.setdefault(dk, _empty())
+            _add_day_tokens(d, dk, qcli_tool, token_total(day))
+            for model_name, usage in day.get("models", {}).items():
+                name = f"{nice_model(model_name)} ({qcli_label})"
+                model = models.setdefault(
+                    name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+                           "reason": 0, "tool": qcli_tool})
+                for field in ("in", "out", "cr", "cw"):
+                    model[field] += int(usage.get(field, 0) or 0)
 
     # --- 持久账本高水位合并:逐工具逐日取 max,被清理的历史天由账本兜底补进序列 ---
     # 同一份数据的存档与实时绝不相加:cost 直接与该工具当日成本列取 max;
@@ -13894,7 +16229,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     # 输出结构保持完全不变(qoderwork/qoder_ide/qodercli 无成本列,只参与 token 合并)。
     _LEDGER_COST_COLUMNS = frozenset((
         "claude", "codex", "codex_reserve", "gemini", "grok", "hermes", "openclaw", "zcode",
-        "mimocode", "devin", "pi", "workbuddy", "workbuddy_ai", "codebuddy", "deepseek_harness",
+        "mimocode", "devin", "minimax", "pi", "workbuddy", "workbuddy_ai", "codebuddy",
+        "deepseek_harness",
         "opencode", "qwencode", "musecode", "cmdcode"))
     for tool, tool_days in _load_ledger().get("tools", {}).items():
         if not isinstance(tool_days, dict):
@@ -13948,7 +16284,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "hermes": round(v["hermes"], 2),
               "openclaw": round(v["openclaw"], 2),
               "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2),
-              "devin": round(v["devin"], 2), "pi": round(v["pi"], 2),
+              "devin": round(v["devin"], 2), "minimax": round(v["minimax"], 2),
+              "pi": round(v["pi"], 2),
               "workbuddy": round(v["workbuddy"], 2),
               "workbuddy_ai": round(v["workbuddy_ai"], 2),
               "codebuddy": round(v["codebuddy"], 2),
@@ -13964,7 +16301,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                              + v["codebuddy"]
                              + v["deepseek_harness"] + v["opencode"] + v["qwencode"]
                              + v["kimicode"] + v["musecode"] + v["cmdcode"] + v["prime_agent"] + v["hermes"]
-                             + v["openclaw"] + v["devin"], 2),
+                             + v["openclaw"] + v["devin"] + v["minimax"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "xr_in": v["xr_in"], "xr_out": v["xr_out"],
@@ -14227,9 +16564,9 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             name = f"{nice_model(model)} (OpenCode)"
             model_tok[name] = model_tok.get(name, 0) + token_total(usage)
 
-    # --- ZCode / MiMoCode / Devin ---
+    # --- ZCode / MiMoCode / Devin / MiniMax Code ---
     for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode"),
-                             ("devin", "Devin")):
+                             ("devin", "Devin"), ("minimax", "MiniMax Code")):
         for dk, day in _iter_cached_token_days(cache.get(tool_key, {})):
             if cutoff and dk < cutoff:
                 continue
@@ -14436,17 +16773,18 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             nm = f"{nice_model(model_name)} (Qoder)"
             model_tok[nm] = model_tok.get(nm, 0) + tok
 
-    # --- Qoder CLI (deduplicated transcript usage, no cost) ---
-    for dk, day in _qodercli_usage_days(cache.get("qodercli", {})).items():
-        if cutoff and dk < cutoff:
-            continue
-        tok = token_total(day)
-        day_tokens[dk] = day_tokens.get(dk, 0) + tok
-        weekday[date.fromisoformat(dk).weekday()] += tok
-        add_hours(dk, day.get("hours"))
-        for model_name, usage in day.get("models", {}).items():
-            name = f"{nice_model(model_name)} (Qoder CLI)"
-            model_tok[name] = model_tok.get(name, 0) + token_total(usage)
+    # --- Qoder CLI / Qoder CN (deduplicated transcript usage, no cost) ---
+    for qcli_tool, (_root, _env, qcli_label) in _QODERCLI_DIRS.items():
+        for dk, day in _qodercli_usage_days(cache.get(qcli_tool, {})).items():
+            if cutoff and dk < cutoff:
+                continue
+            tok = token_total(day)
+            day_tokens[dk] = day_tokens.get(dk, 0) + tok
+            weekday[date.fromisoformat(dk).weekday()] += tok
+            add_hours(dk, day.get("hours"))
+            for model_name, usage in day.get("models", {}).items():
+                name = f"{nice_model(model_name)} ({qcli_label})"
+                model_tok[name] = model_tok.get(name, 0) + token_total(usage)
 
     # --- 持久账本合并:全部指标统一账本口径 ---
     # 账本是同一份数据的高水位存档:同一天取 max(账本合计, 实时值),绝不相加以免重复计数
@@ -14514,18 +16852,27 @@ def build_wrapped(period="all", refresh=True, _cache=None):
     night_share = round(night / hours_total * 100, 1) if hours_total else 0.0
 
     ach = []
-    def add(icon, title, desc, tint):
-        ach.append({"icon": icon, "title": title, "desc": desc, "tint": tint})
+    def add(icon, title, desc, tint, tokens=None, template=None):
+        # desc 是给中文界面的现成句子；带「亿」的另给原始数和不含单位的模板，
+        # 其他语言的界面用 K / M / B 重写数字（「亿」没法靠套模板换算）。
+        item = {"icon": icon, "title": title, "desc": desc, "tint": tint}
+        if tokens is not None and template:
+            item.update({"tokens": int(tokens), "tokens_template": template})
+        ach.append(item)
 
     # Token 里程碑(金,取最高档)
     if total_tokens >= 1_000_000_000_000:
-        add("crown.fill", "万亿先生", f"{total_tokens/1e12:.2f} 万亿 token", "gold")
+        add("crown.fill", "万亿先生", f"{total_tokens/1e12:.2f} 万亿 token", "gold",
+            total_tokens, "%@ token")
     elif total_tokens >= 100_000_000_000:
-        add("hexagon.fill", "千亿先生", f"{total_tokens/1e8:.0f} 亿 token", "gold")
+        add("hexagon.fill", "千亿先生", f"{total_tokens/1e8:.0f} 亿 token", "gold",
+            total_tokens, "%@ token")
     elif total_tokens >= 10_000_000_000:
-        add("diamond.fill", "百亿先生", f"{total_tokens/1e8:.0f} 亿 token", "gold")
+        add("diamond.fill", "百亿先生", f"{total_tokens/1e8:.0f} 亿 token", "gold",
+            total_tokens, "%@ token")
     elif total_tokens >= 1_000_000_000:
-        add("diamond", "十亿先生", f"{total_tokens/1e8:.1f} 亿 token", "gold")
+        add("diamond", "十亿先生", f"{total_tokens/1e8:.1f} 亿 token", "gold",
+            total_tokens, "%@ token")
 
     # 成本里程碑(绿,取最高档)
     if total_cost >= 100000:
@@ -14545,7 +16892,8 @@ def build_wrapped(period="all", refresh=True, _cache=None):
 
     # 单日爆发(火橙)
     if busiest_tok >= 1_000_000_000:
-        add("bolt.fill", "爆肝日", f"单日 {busiest_tok/1e8:.0f} 亿 token", "coral")
+        add("bolt.fill", "爆肝日", f"单日 {busiest_tok/1e8:.0f} 亿 token", "coral",
+            busiest_tok, "单日 %@ token")
 
     # 项目维度(青蓝)
     if max_projs_day >= 5:
@@ -15150,6 +17498,7 @@ _PROJECT_SOURCES = (
 _PROJECT_DAY_SOURCES = (
     # tool_key,  显示名
     ("devin",    "Devin"),
+    ("minimax",  "MiniMax Code"),
     ("hermes",   "Hermes"),
     ("opencode", "OpenCode"),
     ("mimocode", "MiMoCode"),
@@ -15463,6 +17812,8 @@ def hq_status(project_path):
 def _detect_local_servers(project_paths):
     """检测哪些项目目录下有进程正在监听 TCP 端口。返回 {path: [port, ...]}。"""
     import subprocess
+    if _IS_WINDOWS:
+        return {}  # Windows 读不到其他进程的工作目录，无法对应到项目
     try:
         # 1) pid → ports (LISTEN)
         out1 = subprocess.check_output(
@@ -15518,6 +17869,12 @@ def _detect_local_servers(project_paths):
 
 
 if __name__ == "__main__":
+    if _IS_WINDOWS:
+        # Windows 管道按系统代码页（GBK / cp1252）编码，中文和 ⚡ 这类符号会直接报错；
+        # 宿主一律按 UTF-8 读。
+        for _stream in (sys.stdout, sys.stderr):
+            if hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="replace")
     if "--update-prices" in sys.argv:
         sys.exit(update_prices())
     if "--update-unknown" in sys.argv:

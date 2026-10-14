@@ -226,5 +226,126 @@ class OpenCodeSqliteTests(unittest.TestCase):
         self.assertEqual(second["ranges"]["all"]["failed"], 1)
 
 
+
+class OpenCodeV2Tests(unittest.TestCase):
+    """OpenCode 新版把消息写进 session_message：角色在行的 type 列，模型是
+    {id, providerID} 引用。迁移过来的历史两张表都有，消息 ID 相同。"""
+
+    def v2_assistant(self, created, input_tokens, model="claude-sonnet-4.6", provider="anthropic"):
+        return {
+            "type": "assistant", "agent": "build",
+            "model": {"id": model, "providerID": provider},
+            "content": [], "cost": 0.25,
+            "tokens": {"input": input_tokens, "output": 10, "reasoning": 3,
+                       "cache": {"read": 4, "write": 5}},
+            "time": {"created": created},
+        }
+
+    def database(self, root, v1=(), v2=(), sessions=()):
+        path = Path(root) / "opencode.db"
+        connection = sqlite3.connect(path)
+        connection.execute("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT)")
+        connection.execute(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)")
+        connection.execute(
+            "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, "
+            "seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT)")
+        connection.executemany("INSERT INTO session VALUES (?, ?)", sessions)
+        for message_id, session_id, created, data in v1:
+            connection.execute("INSERT INTO message VALUES (?, ?, ?, ?)",
+                               (message_id, session_id, created, json.dumps(data)))
+        for seq, (message_id, session_id, kind, created, data) in enumerate(v2):
+            connection.execute("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)",
+                               (message_id, session_id, kind, seq, created, created,
+                                json.dumps(data)))
+        connection.commit()
+        connection.close()
+        return str(path)
+
+    def test_new_sessions_written_only_to_v2_are_counted(self):
+        created = int(datetime.now().astimezone().timestamp() * 1000)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.database(tmp, v2=[
+                ("msg-1", "ses-1", "user", created, {"type": "user", "text": "hi"}),
+                ("msg-2", "ses-1", "assistant", created, self.v2_assistant(created, 100)),
+            ], sessions=[("ses-1", "/work/tokei")])
+            days, message_ids = USAGE._scan_opencode_database(path)
+        day = next(iter(days.values()))
+        self.assertEqual((day["in"], day["out"], day["cr"], day["cw"], day["reason"]),
+                         (100, 10, 4, 5, 3))
+        self.assertEqual(list(day["models"]), ["claude-sonnet-4.6"])
+        self.assertEqual(day["sessions"], ["ses-1"])
+        self.assertEqual(list(day["projects"]), ["/work/tokei"])
+        self.assertEqual(message_ids, ["msg-2"], "用户消息不计")
+
+    def test_a_message_in_both_tables_counts_once_from_v2(self):
+        created = int(datetime.now().astimezone().timestamp() * 1000)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.database(
+                tmp,
+                v1=[("msg-old", "ses-1", created, assistant("msg-old", "ses-1", created, 999)),
+                    ("msg-v1-only", "ses-1", created,
+                     assistant("msg-v1-only", "ses-1", created, 7))],
+                v2=[("msg-old", "ses-1", "assistant", created, self.v2_assistant(created, 100))])
+            days, message_ids = USAGE._scan_opencode_database(path)
+        day = next(iter(days.values()))
+        self.assertEqual(day["in"], 107, "重叠的那条以 V2 为准，V1 只补 V2 没有的")
+        self.assertEqual(sorted(message_ids), ["msg-old", "msg-v1-only"])
+
+    def test_a_database_without_v2_tables_still_scans(self):
+        """MiMoCode 等沿用 V1 结构的库不受影响。"""
+        created = int(datetime.now().astimezone().timestamp() * 1000)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mimo.db"
+            connection = sqlite3.connect(path)
+            connection.execute(
+                "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)")
+            connection.execute("INSERT INTO message VALUES (?, ?, ?, ?)",
+                               ("m", "s", created, json.dumps(assistant("m", "s", created, 42))))
+            connection.commit()
+            connection.close()
+            days, _ = USAGE._scan_opencode_database(str(path))
+        self.assertEqual(next(iter(days.values()))["in"], 42)
+
+
+class SyncSnapshotBytecodeTests(unittest.TestCase):
+    def test_the_sync_helper_never_writes_pycache_into_the_app_bundle(self):
+        """它以模块方式导入 App 包里的采集器；写出 __pycache__ 会让 App 签名失效。"""
+        source = (Path(__file__).resolve().parents[1]
+                  / "Tokei/Sources/Tokei/DataLoader.swift").read_text(encoding="utf-8")
+        helper = source[source.index("private static let syncSnapshotPython"):]
+        helper = helper[:helper.index('"""', helper.index('"""') + 3)]
+        self.assertLess(helper.index("sys.dont_write_bytecode = True"),
+                        helper.index("spec.loader.exec_module"))
+
+    def test_the_collector_launcher_caches_bytecode_outside_the_app_bundle(self):
+        """每轮刷新都跑的采集器：字节码缓存要有（省掉每轮重新编译），但不能写进 App 包。"""
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        source = (Path(__file__).resolve().parents[1]
+                  / "Tokei/Sources/Tokei/DataLoader.swift").read_text(encoding="utf-8")
+        start = source.index('"""', source.index("private static let scriptLauncherPython")) + 3
+        lines = source[start:source.index('"""', start)].splitlines()
+        indent = min(len(line) - len(line.lstrip()) for line in lines if line.strip())
+        launcher = "\n".join(line[indent:] for line in lines)
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp) / "Tokei.app" / "Contents" / "Resources"
+            bundle.mkdir(parents=True)
+            script = bundle / "usage.30s.py"
+            script.write_text("import sys\nif __name__ == '__main__':\n    print('ran', sys.argv[1:])\n",
+                              encoding="utf-8")
+            env = dict(os.environ, HOME=tmp)
+            for _ in range(2):
+                result = subprocess.run([sys.executable, "-c", launcher, str(script), "--json"],
+                                        capture_output=True, text=True, env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "ran ['--json']")
+            self.assertFalse(any(bundle.rglob("__pycache__")), "App 包里不能出现 __pycache__")
+            cached = list((Path(tmp) / ".tokei" / "cache" / "pycache").rglob("usage.30s.*.pyc"))
+            self.assertEqual(len(cached), 1, "字节码缓存写在 App 包外面")
+
+
 if __name__ == "__main__":
     unittest.main()

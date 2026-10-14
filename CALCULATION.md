@@ -15,6 +15,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Qoder Desktop | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | SQLite, `chat_message.token_info` / `model_info` |
 | QoderWork | `~/Library/Application Support/QoderWork/data/agents.db` | SQLite, `messages.metadata` |
 | Qoder CLI | `~/.qoder/projects/**/*.jsonl` | JSONL, 会话/调用/工具/时长；文本量估算 Token |
+| Qoder CN | `~/.qoder-cn/projects/**/*.jsonl` | 与 Qoder CLI 同格式同口径，单独成键 `qodercli_cn`；内置路由不落 token 时只记 Credits |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` | SQLite, `session_model_usage*` 用量表，回退 `sessions` 表 |
 | OpenClaw | `~/.openclaw/state/openclaw.sqlite` + agent SQLite；兼容旧 JSONL | SQLite/JSONL 用量 + SQLite 任务 |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
@@ -32,6 +33,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Kimi Code(额度) | `${KIMI_CODE_HOME:-~/.kimi-code}/credentials/kimi-code.json` → `api.kimi.com/coding/v1/usages` | 本机登录态只读查询，见 §5 |
 | ZCode | `~/.zcode/cli/db/db.sqlite` | SQLite, `model_usage` Token 明细 |
 | MiMoCode | `$XDG_DATA_HOME/mimocode/mimocode*.db`，macOS 使用 `~/Library/Application Support/mimocode/` | SQLite, OpenCode-compatible `message` 数据 |
+| MiniMax Code | `~/.minimax/v2/sqlite/runtime-state.sqlite` + `~/.minimax/v2/observability/logs/runtime-*.log` | SQLite `local_runtime_token_usage` 四桶并列（input / output / cacheRead / cacheWrite）；库里无模型名，按 `turn_id` 关联日志 `llm_response_identifiers` 的 `model`，对上的结果按行号区间存进扫描缓存，日志轮转后不丢 |
 
 ---
 

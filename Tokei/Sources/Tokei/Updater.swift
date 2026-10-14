@@ -29,6 +29,7 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
     private var checkedReleases: [UpdateRelease] = []
     private var sawValidMetadata = false
     private var sawNewerIncompleteRelease = false
+    private var lastCheckUserInitiated = false
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForResource = 300
@@ -37,12 +38,14 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
 
     static let shared = Updater()
 
-    func checkForUpdate() {
-        // 本地验证包可能含有尚未发布的修复，不能被线上旧代码替换。
-        guard !Self.isLocalBuild else { return }
+    /// 自动检查（启动、定时）跳过本地验证包：它可能含有尚未发布的修复，不能被线上旧代码悄悄替换。
+    /// 用户在设置里手动点「检查更新」时照常检查；查到新版也要再点一次「升级」才会安装。
+    func checkForUpdate(userInitiated: Bool = false) {
+        guard userInitiated || !Self.isLocalBuild else { return }
         guard state == .idle || state == .upToDate || {
             if case .failed = state { return true }; return false
         }() else { return }
+        lastCheckUserInitiated = userInitiated
         state = .checking
         checkedReleases = []
         sawValidMetadata = false
@@ -58,11 +61,11 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
             ) {
                 state = .available(release.tag, release.downloadURL, release.sha256)
             } else if sawNewerIncompleteRelease {
-                setTransientState(.failed("更新信息不完整"), delay: 5)
+                setTransientState(.failed(L("更新信息不完整")), delay: 5)
             } else if sawValidMetadata {
                 setTransientState(.upToDate, delay: 3)
             } else {
-                setTransientState(.failed("网络不可用"), delay: 5)
+                setTransientState(.failed(L("网络不可用")), delay: 5)
             }
             return
         }
@@ -108,10 +111,10 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
     }
 
     func performUpdate() {
-        guard !Self.isLocalBuild else { return }
+        guard !Self.isLocalBuild || lastCheckUserInitiated else { return }
         guard case .available(_, let url, let sha256) = state,
               UpdateSecurity.isAllowedDownloadSourceURL(url) else {
-            state = .failed("更新地址不受信任")
+            state = .failed(L("更新地址不受信任"))
             return
         }
         expectedSHA256 = sha256
@@ -135,22 +138,22 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
                     didFinishDownloadingTo location: URL) {
         guard let finalURL = downloadTask.response?.url,
               UpdateSecurity.isAllowedDownloadResponseURL(finalURL) else {
-            failDownload("更新地址不受信任")
+            failDownload(L("更新地址不受信任"))
             return
         }
         guard let expectedSHA256 = expectedSHA256 else {
-            failDownload("更新包缺少校验信息")
+            failDownload(L("更新包缺少校验信息"))
             return
         }
         let actualSHA256: String
         do {
             actualSHA256 = try UpdateSecurity.sha256(of: location)
         } catch {
-            failDownload("更新包校验失败")
+            failDownload(L("更新包校验失败"))
             return
         }
         guard actualSHA256 == expectedSHA256 else {
-            failDownload("更新包校验失败")
+            failDownload(L("更新包校验失败"))
             return
         }
 
@@ -158,14 +161,14 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
         do {
             workspace = try UpdateInstaller.createWorkspace()
         } catch {
-            failDownload("创建更新目录失败")
+            failDownload(L("创建更新目录失败"))
             return
         }
         do {
             try FileManager.default.moveItem(at: location, to: workspace.dmgURL)
         } catch {
             try? FileManager.default.removeItem(at: workspace.rootURL)
-            failDownload("准备更新文件失败")
+            failDownload(L("准备更新文件失败"))
             return
         }
         self.expectedSHA256 = nil
@@ -186,7 +189,7 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
             ? UpdateSecurity.isAllowedDownloadResponseURL(redirectURL)
             : UpdateSecurity.isAllowedMetadataURL(redirectURL)
         if !isAllowed, isDownload {
-            failDownload("更新地址不受信任")
+            failDownload(L("更新地址不受信任"))
         }
         completionHandler(isAllowed ? request : nil)
     }
@@ -228,7 +231,7 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
             )
         } catch {
             try? FileManager.default.removeItem(at: workspace.rootURL)
-            state = .failed("准备安装脚本失败")
+            state = .failed(L("准备安装脚本失败"))
             return
         }
 
@@ -248,7 +251,7 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
             try proc.run()
         } catch {
             try? FileManager.default.removeItem(at: workspace.rootURL)
-            state = .failed("启动安装程序失败")
+            state = .failed(L("启动安装程序失败"))
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {

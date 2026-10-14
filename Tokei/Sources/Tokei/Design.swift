@@ -45,6 +45,7 @@ enum Theme {
     static let qoder  = Color(red: 0.90, green: 0.75, blue: 0.35)   // 琥珀金
     static let qoderwork = Color(red: 0.75, green: 0.65, blue: 0.30)  // 暗琥珀
     static let qodercli = Color(red: 0.96, green: 0.84, blue: 0.45)  // 亮琥珀
+    static let qodercliCN = Color(red: 0.98, green: 0.62, blue: 0.35) // 橙珊瑚（国内版）
     static let hermes = Color(red: 0.40, green: 0.82, blue: 0.60)   // 翠绿
     static let zcode = Color(red: 0.52, green: 0.80, blue: 0.34)    // 青柠绿
     static let mimocode = Color(red: 0.95, green: 0.50, blue: 0.26) // 暖橙
@@ -62,6 +63,7 @@ enum Theme {
     static let musecode = Color(red: 0.10, green: 0.42, blue: 0.92) // Meta 蓝
     static let cmdcode = Color(red: 0.22, green: 0.68, blue: 0.32) // 终端绿
     static let devin = Color(red: 0.42, green: 0.47, blue: 0.98)    // 深蓝紫
+    static let minimax = Color(red: 0.91, green: 0.25, blue: 0.40)  // MiniMax 玫红
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16
@@ -242,6 +244,8 @@ struct MetricCell: View {
     var label: String
     var value: String
     var tint: Color
+    /// 有说明时标签后面带个提示图标，悬停整格显示说明。
+    var help: String? = nil
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
@@ -250,15 +254,23 @@ struct MetricCell: View {
                 .frame(width: 21, height: 21)
                 .background(Circle().fill(tint.opacity(0.10)))
             VStack(alignment: .leading, spacing: 1) {
-                Text(label)
-                    .font(.system(size: Theme.fontSize(9.5)))
-                    .foregroundStyle(Theme.tTertiary)
+                HStack(spacing: 3) {
+                    Text(label)
+                        .font(.system(size: Theme.fontSize(9.5)))
+                    if help != nil {
+                        Image(systemName: "info.circle")
+                            .font(.system(size: Theme.fontSize(8)))
+                    }
+                }
+                .foregroundStyle(Theme.tTertiary)
                 Text(value)
                     .font(.system(size: Theme.fontSize(12.5), weight: .semibold, design: .monospaced))
                     .foregroundStyle(Theme.tPrimary)
             }
             Spacer(minLength: 0)
         }
+        .contentShape(Rectangle())
+        .help(help ?? "")
     }
 }
 
@@ -344,10 +356,20 @@ struct SegmentedTabs: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         guard sel != k else { return }
-                        sel = k
+                        // 高亮块照常做弹簧动画，但页面切换本身必须留在动画之外。
+                        //
+                        // 两者写在同一个闭包里时，SwiftUI 会把它们并进同一个事务，
+                        // 于是整块面板的布局跟着弹簧一起动。面板是挂在菜单栏按钮上的
+                        // NSPopover，开着的时候做动画式布局会让 AppKit 重新挑选屏幕和
+                        // 锚点——在全屏 Space 与外接显示器下会把面板甩到屏幕边上。
+                        // main.swift 里的 sizingOptions = [] 与 animates = false 堵的是
+                        // 同一件事的另外两个入口，这里是第三个。
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
                             highlighted = k
                         }
+                        var pageChange = Transaction()
+                        pageChange.disablesAnimations = true
+                        withTransaction(pageChange) { sel = k }
                     }
             }
         }

@@ -365,9 +365,9 @@ struct DashboardView: View {
         let top = Array(sorted.prefix(8))
         let maxTokens = Double(top.first?.tokens ?? 1)
         return VStack(alignment: .leading, spacing: 9) {
-            Text("模型用量").font(.system(size: Theme.fontSize(13), weight: .bold))
+            Text(L("模型用量")).font(.system(size: Theme.fontSize(13), weight: .bold))
             ForEach(top) { m in
-                StatBar(name: m.name,
+                StatBar(name: L10n.data(m.name),
                         tokens: m.tokens ?? ((m.in ?? 0) + (m.out ?? 0)),
                         cost_cny: m.cost_cny, cost: m.cost, maxTokens: maxTokens,
                         tint: modelTint(m.tool))
@@ -380,13 +380,13 @@ struct DashboardView: View {
         let top = Array(sorted.prefix(8))
         let maxTokens = Double(top.first?.tokens ?? 1)
         return VStack(alignment: .leading, spacing: 9) {
-            Text("账号 Provider 模型").font(.system(size: Theme.fontSize(13), weight: .bold))
-            Text("账号级统计单独展示，不并入本地工具总计")
+            Text(L("账号 Provider 模型")).font(.system(size: Theme.fontSize(13), weight: .bold))
+            Text(L("账号级统计单独展示，不并入本地工具总计"))
                 .font(.system(size: Theme.fontSize(9)))
                 .foregroundStyle(Theme.tTertiary)
             ForEach(top) { model in
                 StatBar(
-                    name: model.name,
+                    name: L10n.data(model.name),
                     tokens: model.tokens ?? ((model.in ?? 0) + (model.out ?? 0)),
                     cost: model.cost,
                     maxTokens: maxTokens,
@@ -408,6 +408,7 @@ struct DashboardView: View {
         case "qoder": return Theme.qoder
         case "qoderwork": return Theme.qoderwork
         case "qodercli": return Theme.qodercli
+        case "qodercli_cn": return Theme.qodercliCN
         case "hermes": return Theme.hermes
         case "zcode": return Theme.zcode
         case "mimocode": return Theme.mimocode
@@ -424,6 +425,7 @@ struct DashboardView: View {
         case "musecode": return Theme.musecode
         case "cmdcode": return Theme.cmdcode
         case "devin": return Theme.devin
+        case "minimax": return Theme.minimax
         default: return Theme.claude
         }
     }
@@ -436,7 +438,7 @@ struct DashboardView: View {
                 withAnimation(.easeInOut(duration: 0.25)) { hideProjects.toggle() }
             } label: {
                 HStack(spacing: 5) {
-                    Text("项目排行").font(.system(size: Theme.fontSize(13), weight: .bold))
+                    Text(L("项目排行")).font(.system(size: Theme.fontSize(13), weight: .bold))
                         .foregroundStyle(Theme.tPrimary)
                     Image(systemName: hideProjects ? "eye.slash.fill" : "eye")
                         .font(.system(size: Theme.fontSize(9))).foregroundStyle(Theme.tTertiary)
@@ -448,7 +450,7 @@ struct DashboardView: View {
             }
             .buttonStyle(.plain)
             if hideProjects {
-                Text("已隐藏 \(projects.count) 个项目")
+                Text(L("已隐藏 %@ 个项目", projects.count))
                     .font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
             } else {
                 ForEach(projects) { p in
@@ -467,11 +469,11 @@ struct DashboardView: View {
     var heatmapSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("活跃热力")
+                Text(L("活跃热力"))
                     .font(.system(size: Theme.fontSize(13), weight: .bold))
                 Spacer()
                 Picker("", selection: $heatRange) {
-                    Text("周").tag(0); Text("月").tag(1); Text("年").tag(2)
+                    Text(L("周")).tag(0); Text(L("月")).tag(1); Text(L("年")).tag(2)
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 120)
@@ -495,7 +497,7 @@ struct DashboardView: View {
         let today = Date()
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd"
-        let dayLabels = ["一", "二", "三", "四", "五", "六", "日"]
+        let dayLabels = Fmt.weekdayLabels
         let activityMap = Dictionary(uniqueKeysWithValues: daily.map { ($0.date, Double($0.tokens)) })
         let maxActivity = daily.map { Double($0.tokens) }.max() ?? 1
 
@@ -554,7 +556,7 @@ struct DashboardView: View {
 
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd"
-        let dayLabels = ["一", "二", "三", "四", "五", "六", "日"]
+        let dayLabels = Fmt.weekdayLabels
 
         struct Cell: Identifiable {
             var id: Int; var row: Int; var col: Int; var activity: Double; var dateStr: String
@@ -646,13 +648,13 @@ struct DashboardView: View {
     var heatmapLegend: some View {
         HStack(spacing: 5) {
             Spacer()
-            Text("少").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
+            Text(L("少")).font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
             ForEach(0..<5, id: \.self) { i in
                 RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                     .fill(i == 0 ? Color.primary.opacity(0.04) : Self.heatColors[i])
                     .frame(width: 12, height: 12)
             }
-            Text("多").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
+            Text(L("多")).font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
         }
     }
 
@@ -1111,14 +1113,17 @@ struct DashboardView: View {
                                  input: qoder.in + qoder.cached, out: qoder.out, tokens: qoderTokens))
         }
 
-        let qodercli = usage.qodercli.ranges.get(key)
-        if !qodercli.models.isEmpty {
-            appendTokenModels(qodercli.models, tool: "qodercli", suffix: "Qoder CLI", to: &out)
-        } else if qodercli.totalTokens > 0 {
-            out.append(modelCost(name: usage.qodercli.model ?? "Qoder CLI", cost: 0,
-                                 tool: "qodercli", input: qodercli.in, out: qodercli.out,
-                                 cr: qodercli.cr, cw: qodercli.cw,
-                                 tokens: qodercli.totalTokens))
+        for (tool, name, stat) in [("qodercli", "Qoder CLI", usage.qodercli),
+                                   ("qodercli_cn", "Qoder CN", usage.qodercliCN)] {
+            let r = stat.ranges.get(key)
+            if !r.models.isEmpty {
+                appendTokenModels(r.models, tool: tool, suffix: name, to: &out)
+            } else if r.totalTokens > 0 {
+                out.append(modelCost(name: stat.model ?? name, cost: 0,
+                                     tool: tool, input: r.in, out: r.out,
+                                     cr: r.cr, cw: r.cw,
+                                     tokens: r.totalTokens))
+            }
         }
 
         appendTokenModels(usage.hermes.ranges.get(key).models, tool: "hermes", suffix: "Hermes", to: &out)
@@ -1141,6 +1146,8 @@ struct DashboardView: View {
                           reasonIncludedInOutput: true, to: &out)
         appendTokenModels(usage.cmdcode.ranges.get(key).models, tool: "cmdcode", suffix: "Command Code", to: &out)
         appendTokenModels(usage.devin.ranges.get(key).models, tool: "devin", suffix: "Devin", to: &out)
+        appendTokenModels(usage.minimax.ranges.get(key).models, tool: "minimax",
+                          suffix: "MiniMax Code", to: &out)
 
         return out.sorted {
             if ($0.tokens ?? 0) != ($1.tokens ?? 0) { return ($0.tokens ?? 0) > ($1.tokens ?? 0) }
@@ -1186,6 +1193,7 @@ struct DashboardView: View {
         let qoderwork = usage.qoderwork.ranges.get(key)
         let qoder = usage.qoder.ranges.get(key)
         let qodercli = usage.qodercli.ranges.get(key)
+        let qodercliCN = usage.qodercliCN.ranges.get(key)
         return claude.in + claude.out + claude.cr + claude.cw
             + codex.tokens
             + reserve.tokens
@@ -1194,6 +1202,7 @@ struct DashboardView: View {
             + qoderwork.in + qoderwork.out
             + qoder.in + qoder.cached + qoder.out
             + qodercli.totalTokens
+            + qodercliCN.totalTokens
             + hermesTotal(usage.hermes.ranges.get(key))
             + tokenUsageTotal(usage.zcode.ranges.get(key))
             + tokenUsageTotal(usage.mimocode.ranges.get(key))
@@ -1209,6 +1218,7 @@ struct DashboardView: View {
             + tokenUsageTotal(usage.musecode.ranges.get(key), reasonIncludedInOutput: true)
             + tokenUsageTotal(usage.cmdcode.ranges.get(key))
             + tokenUsageTotal(usage.devin.ranges.get(key))
+            + tokenUsageTotal(usage.minimax.ranges.get(key))
     }
 
     static func usageTotalCost(_ usage: Usage, _ key: RangeKey) -> Double {
@@ -1232,6 +1242,7 @@ struct DashboardView: View {
             + usage.musecode.ranges.get(key).cost
             + usage.cmdcode.ranges.get(key).cost
             + usage.devin.ranges.get(key).cost
+            + usage.minimax.ranges.get(key).cost
     }
 
     static func tokenUsageTotal(
