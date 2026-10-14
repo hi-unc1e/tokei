@@ -102,6 +102,7 @@ final class Store: ObservableObject {
         lastRefreshStartedAt = Date()
         refreshCycle += 1
         let cycle = refreshCycle
+        let startedAt = lastRefreshStartedAt
         DataLoader.load { [weak self] u in
             guard let self = self else { return }
             // 看门狗换代后旧回调直接作废，防止它把新一轮的 in-flight 状态清掉。
@@ -209,7 +210,7 @@ final class Store: ObservableObject {
         refreshWatchdog = timer
     }
 
-    private func recordQuotaHistory(_ usage: Usage) {
+    private func recordQuotaHistory(_ usage: Usage, claudeQuotaSource: Usage) {
         let claudeRange = usage.claude.ranges.get(.today)
         let codexRange = usage.codex.ranges.get(.today)
         let claudeModels = claudeRange.models.reduce(into: [String: Int]()) { totals, model in
