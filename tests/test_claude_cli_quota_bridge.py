@@ -1,3 +1,4 @@
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ClaudeCLIQuotaBridgeTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_bridge_cache_and_failure_behavior(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "claude-cli-quota-bridge-check"

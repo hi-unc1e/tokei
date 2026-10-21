@@ -1,3 +1,4 @@
+import sys
 import re
 import subprocess
 import tempfile
@@ -17,6 +18,7 @@ PANEL_FILES = [
 
 
 class PanelTypographyTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_two_bounded_font_sizes(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "panel-typography-check"

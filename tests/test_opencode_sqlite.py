@@ -336,7 +336,7 @@ class SyncSnapshotBytecodeTests(unittest.TestCase):
             script = bundle / "usage.30s.py"
             script.write_text("import sys\nif __name__ == '__main__':\n    print('ran', sys.argv[1:])\n",
                               encoding="utf-8")
-            env = dict(os.environ, HOME=tmp)
+            env = dict(os.environ, HOME=tmp, USERPROFILE=tmp)
             for _ in range(2):
                 result = subprocess.run([sys.executable, "-c", launcher, str(script), "--json"],
                                         capture_output=True, text=True, env=env)

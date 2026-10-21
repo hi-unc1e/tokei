@@ -32,12 +32,20 @@ class UpdaterSecurityTests(unittest.TestCase):
                 compile_result.stdout + compile_result.stderr,
             )
 
-            run_result = subprocess.run(
-                [str(binary)],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            # 两次真实 DMG 创建、挂载、签名和安装在 CI 虚拟机上可能超过 30 秒。
+            try:
+                run_result = subprocess.run(
+                    [str(binary)],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.TimeoutExpired as error:
+                output = error.stderr or b""
+                if isinstance(output, bytes):
+                    output = output.decode("utf-8", errors="replace")
+                self.fail("Updater DMG integration exceeded 120 seconds:\n" + output)
+            sys.stderr.write(run_result.stderr)
             self.assertEqual(
                 run_result.returncode,
                 0,
@@ -45,6 +53,7 @@ class UpdaterSecurityTests(unittest.TestCase):
             )
             self.assertIn("Updater security checks passed", run_result.stdout)
 
+    @unittest.skipUnless(sys.platform == "darwin", "DMG release tooling requires macOS")
     def test_release_metadata_includes_dmg_sha256(self):
         root = Path(__file__).resolve().parents[1]
         generator = root / "Tokei" / "generate_update_metadata.sh"

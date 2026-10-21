@@ -1,3 +1,4 @@
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class GrokBotHelperManagerTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_persistent_helper_is_installed_once_and_reused(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "grok-bot-helper-manager-check"

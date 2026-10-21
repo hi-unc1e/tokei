@@ -233,7 +233,9 @@ class DashboardCacheTests(unittest.TestCase):
             },
         }
 
-        result = USAGE.build_daily_costs("1d", refresh=False, _cache=cache)
+        with mock.patch.object(USAGE, "_grok_bot_provider_days_cache_key",
+                               return_value=USAGE._GROK_BOT_PROVIDER_DAYS_CACHE_KEY):
+            result = USAGE.build_daily_costs("1d", refresh=False, _cache=cache)
 
         self.assertEqual(result["daily"], [])
         self.assertEqual(sum(model["tokens"] for model in result["provider_models"]), 660)

@@ -1,0 +1,98 @@
+import SwiftUI
+import AppKit
+
+enum Theme {
+    static func fontSize(_ points: CGFloat) -> CGFloat { points * 1.6 }
+    static let tPrimary = Color.white
+    static let tTertiary = Color.white.opacity(0.8)
+}
+
+/* PRODUCTION_CELLS */
+
+final class Fixture: ObservableObject {
+    @Published var step = 0
+}
+
+struct Probe: View {
+    @ObservedObject var fixture: Fixture
+    /* PRODUCTION_METRIC */
+    /* PRODUCTION_IDENTITY */
+    /* PRODUCTION_GRID */
+
+    var body: some View {
+        let phase = fixture.step % 5
+        let speed = ["52 tok/s", "45 tok/s", "27 tok/s", "", "73 tok/s"][phase]
+        let ttft = ["12s", "2.3s", "", "", "6s"][phase]
+        var metrics: [Metric] = [
+            .init("arrow.down", "Input", "\(1000 + fixture.step)"),
+            .init("bolt.fill", "Cached", "\(2000 + fixture.step)"),
+            .init("arrow.up", "Output", "\(3000 + fixture.step)")
+        ]
+        if phase == 1 || phase == 3 || phase == 4 {
+            metrics.append(.init("brain", "Reason", "404"))
+        }
+        if !speed.isEmpty { metrics.append(.init("gauge.medium", phase == 4 ? "Speed (incl. wait)" : "Speed", speed)) }
+        if !ttft.isEmpty { metrics.append(.init("timer", "TTFT", ttft)) }
+        switch (fixture.step / 5) % 4 {
+        case 1:
+            metrics.removeAll { ["Cached", "Input"].contains($0.label) }
+        case 2:
+            metrics = [.init("bubble.left", "Messages", "\(fixture.step)"),
+                       .init("sparkles", "Responses", "\(fixture.step + 1)")]
+            if phase % 2 == 0 { metrics.append(.init("clock", "Active", "30s")) }
+        case 3:
+            metrics.insert(.init("circle.hexagongrid.fill", "Credits", "\(fixture.step)"), at: 0)
+        default: break
+        }
+        return metricGrid(phase == 4 ? [] : [.init("dollarsign.circle", "Cost", "$171.34")],
+                          hit: phase == 2 ? 0 : 96, extra: metrics, tint: .blue)
+            .padding(24).frame(width: 640, height: 360, alignment: .topLeading)
+            .background(Color.black).environment(\.colorScheme, .dark)
+    }
+}
+
+let app = NSApplication.shared
+app.setActivationPolicy(.prohibited)
+let fixture = Fixture()
+let host = NSHostingView(rootView: Probe(fixture: fixture))
+let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
+                      styleMask: [.borderless], backing: .buffered, defer: false)
+window.contentView = host
+host.frame = NSRect(x: 0, y: 0, width: 640, height: 360)
+let out = URL(fileURLWithPath: CommandLine.arguments[1])
+try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+var failures = 0
+for step in 0..<40 {
+    fixture.step = step
+    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+    host.layoutSubtreeIfNeeded()
+    guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { fatalError("No render target") }
+    host.cacheDisplay(in: host.bounds, to: rep)
+    guard let png = rep.representation(using: .png, properties: [:]), rep.cgImage != nil else { fatalError("No pixels") }
+    try png.write(to: out.appendingPathComponent("step-\(step).png"))
+    let freshFixture = Fixture()
+    freshFixture.step = step
+    let freshHost = NSHostingView(rootView: Probe(fixture: freshFixture))
+    let freshWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
+                               styleMask: [.borderless], backing: .buffered, defer: false)
+    freshWindow.contentView = freshHost
+    freshHost.frame = host.frame
+    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+    freshHost.layoutSubtreeIfNeeded()
+    guard let expected = freshHost.bitmapImageRepForCachingDisplay(in: freshHost.bounds) else { fatalError("No expected render target") }
+    freshHost.cacheDisplay(in: freshHost.bounds, to: expected)
+    let sameSize = rep.pixelsWide == expected.pixelsWide && rep.pixelsHigh == expected.pixelsHigh && rep.bytesPerRow == expected.bytesPerRow
+    var differences = 0
+    if sameSize, let a = rep.bitmapData, let b = expected.bitmapData {
+        for i in 0..<(rep.bytesPerRow * rep.pixelsHigh) where a[i] != b[i] { differences += 1 }
+    } else { differences = -1 }
+    if differences != 0 {
+        failures += 1
+        print("FAIL step=\(step) differentBytes=\(differences)")
+        if let expectedPNG = expected.representation(using: .png, properties: [:]) {
+            try expectedPNG.write(to: out.appendingPathComponent("expected-\(step).png"))
+        }
+    }
+}
+print("native rendered updates: 40, failures: \(failures)")
+exit(failures == 0 ? 0 : 1)

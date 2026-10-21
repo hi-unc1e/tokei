@@ -43,6 +43,22 @@ class QuotaDetailCacheTests(unittest.TestCase):
                     self.assertEqual(USAGE._quota_detail_payload(), {'fresh': True})
                     collect.assert_called_once_with()
 
+    def test_snapshot_age_tolerates_only_small_file_clock_skew(self):
+        payload = {tool: {} for tool, _ in USAGE._QUOTA_TOOLS}
+        now = 1_800_000_000
+        for age, accepted in ((0, True), (-0.5, True), (-1, True),
+                              (-1.01, False), (60, True), (60.01, False)):
+            with self.subTest(age=age), tempfile.TemporaryDirectory() as home:
+                path = Path(home, '.tokei', 'last_usage.json')
+                path.parent.mkdir()
+                path.write_text(json.dumps(payload))
+                os.utime(path, (now - age, now - age))
+                with mock.patch.object(USAGE, 'HOME', home), \
+                        mock.patch.object(USAGE, 'datetime', wraps=USAGE.datetime) as clock:
+                    clock.now.return_value = USAGE.datetime.fromtimestamp(now)
+                    actual = USAGE._recent_quota_detail_payload()
+                self.assertEqual(actual, payload if accepted else None)
+
     def test_dirty_event_cache_forces_collection_and_reloads_cache(self):
         payload = {tool: {} for tool, _ in USAGE._QUOTA_TOOLS}
         refreshed_cache = {'_dirty': False, 'codex': {'fresh': True}}

@@ -49,6 +49,15 @@ class LedgerWriteTests(unittest.TestCase):
         U.ledger_reconcile("grok", {self.today: {"in": 30}})
         self.assertEqual(self.flush_and_reload()["tools"]["grok"][self.today]["in"], 30)
 
+    def test_disabled_interval_flushes_even_if_file_time_is_ahead(self):
+        U.ledger_reconcile("grok", {self.today: {"in": 10}})
+        U.ledger_flush()
+        future = time.time() + 10
+        os.utime(self.path, (future, future))
+        with mock.patch.object(U, "_LEDGER_TODAY_FLUSH_INTERVAL", 0):
+            U.ledger_reconcile("grok", {self.today: {"in": 20}})
+            self.assertEqual(self.flush_and_reload()["tools"]["grok"][self.today]["in"], 20)
+
     def test_a_change_to_a_past_day_is_written_at_once(self):
         yesterday = (date.today() - timedelta(days=1)).isoformat()
         U.ledger_reconcile("grok", {self.today: {"in": 10}})

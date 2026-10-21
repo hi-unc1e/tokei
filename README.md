@@ -1,5 +1,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/platform-macOS_13+-black?style=flat-square&logo=apple&logoColor=white" alt="macOS 13+">
+  <img src="https://img.shields.io/badge/platform-Windows_x64-0078D6?style=flat-square" alt="Windows x64">
   <img src="https://img.shields.io/badge/swift-5.9+-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 5.9+">
   <img src="https://img.shields.io/badge/python-3.8+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.8+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License">
@@ -10,7 +11,7 @@
 <h1 align="center">⏱ Tokei 知度</h1>
 
 <p align="center">
-  <strong>macOS 菜单栏 AI 编程用量监控</strong><br>
+  <strong>macOS / Windows AI 编程用量监控</strong><br>
   <sub>了然于心，掌控全局。</sub><br><br>
   <a href="https://tokei.lanshuagent.com">🌐 官网</a> · <a href="https://github.com/hi-unc1e/tokei/releases/latest">⬇️ 下载</a> · <a href="#english">English</a>
 </p>
@@ -20,6 +21,8 @@
 ## 什么是 Tokei？
 
 Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具的用量、成本和额度。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态或用户明确保存的 API Key。
+
+**Windows 版**提供主窗口和托盘快捷面板，安装包内置 Python。两种平台的安装包均可从 [GitHub Releases](https://github.com/cclank/tokei/releases/latest) 下载；Windows 的使用与构建说明见 [windows/README.md](windows/README.md)。
 
 ### 支持的工具
 

@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -140,7 +141,11 @@ class GrokUsageTests(unittest.TestCase):
             cache = {"v": USAGE._SCAN_CACHE_VERSION}
             first = USAGE.scan_grok(USAGE.range_bounds(), cache)
 
+            before = log.stat()
             write_jsonl(log, [usage_line(sid, now, 1, 2000, 700, 200, 40)])
+            self.assertEqual(log.stat().st_size, before.st_size)
+            # Windows 两次快速写入可能拿到相同 mtime，确定性覆盖该情况。
+            os.utime(log, ns=(before.st_atime_ns, before.st_mtime_ns))
             second = USAGE.scan_grok(USAGE.range_bounds(), cache)
 
         self.assertEqual(first["ranges"]["all"]["in"], 200)

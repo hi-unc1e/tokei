@@ -163,7 +163,7 @@ class OpenClawTaskTests(unittest.TestCase):
 
     def test_prefers_new_database_and_accepts_current_statuses(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "db ? folder"
+            root = Path(tmp) / "db # % folder"
             state_db = root / "state" / "openclaw.sqlite"
             legacy_db = root / "tasks" / "runs.sqlite"
             created_ms = int(datetime.now().astimezone().timestamp() * 1000)

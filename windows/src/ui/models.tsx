@@ -77,12 +77,14 @@ export function ModelDetailRow({ row, tint }: { row: ModelRow; tint: RGB }) {
           <TintTag
             tint={tint}
             title={
-              perf.ttft == null
+              (perf.en ?? 0) > 0
+                ? L("输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度", perf.n, perf.en)
+                : perf.ttft == null
                 ? L("平均输出速度来自 %@ 个请求", perf.n)
                 : L("平均输出速度来自 %@ 个请求，TTFT 中位数来自其中 %@ 个", perf.n, perf.tn ?? perf.n)
             }
           >
-            <span style={tagLabel}>{L("平均速度")}</span>
+            <span style={tagLabel}>{(perf.en ?? 0) > 0 ? L("平均速度（含等待）") : L("平均速度")}</span>
             <span style={tagValue}>{Fmt.tps(perf.tps)}</span>
             {perf.ttft != null && (
               <>

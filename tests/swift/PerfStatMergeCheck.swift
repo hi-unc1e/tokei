@@ -17,8 +17,8 @@ struct PerfStatMergeCheck {
          "models": {"Opus 5.5": {"tps": 100.0, "ttft": 0.33, "n": 4, "o": 1000, "g": 10.0, "tn": 2, "th": {"40": 2}}}}
         """.utf8))
         let peer = try JSONDecoder().decode(PerfStat.self, from: Data("""
-        {"tps": 25.0, "ttft": 1.4, "n": 1, "o": 1000, "g": 40.0, "tn": 1, "th": {"70": 1},
-         "models": {"GPT-6.1 Sol": {"tps": 25.0, "ttft": 1.4, "n": 1, "o": 1000, "g": 40.0, "tn": 1, "th": {"70": 1}}}}
+        {"tps": 25.0, "ttft": 1.4, "n": 1, "o": 1000, "g": 40.0, "tn": 1, "th": {"70": 1}, "en": 1,
+         "models": {"GPT-6.1 Sol": {"tps": 25.0, "ttft": 1.4, "n": 1, "o": 1000, "g": 40.0, "tn": 1, "th": {"70": 1}, "en": 1}}}
         """.utf8))
         guard let merged = PerfStat.merged(local, peer) else {
             throw TestFailure.assertion("两台设备都有数据，合并结果不该为空")
@@ -30,8 +30,17 @@ struct PerfStatMergeCheck {
                    "中位数按合并后的直方图重算，和采集器同一套分桶")
         try expect(merged.n == 5 && merged.tn == 3, "请求数和 TTFT 样本数相加")
         try expect(merged.models?.count == 2, "两边的模型都保留")
+        try expect(merged.en == 1 && merged.models?["GPT-6.1 Sol"]?.en == 1,
+                   "跨设备合并后保留含首字等待的请求数")
         try expect(PerfStat.merged(nil, peer) == peer, "本机没有数据时用对方的")
         try expect(PerfStat.merged(local, nil) == local, "对方没有数据时保留本机的")
+
+        let first = PerfStat(tps: 100, ttft: 1, n: 1, o: 100, g: 1, tn: 1, th: ["62": 1])
+        let second = PerfStat(tps: 100, ttft: 9, n: 1, o: 100, g: 1, tn: 1, th: ["107": 1])
+        let even = PerfStat.merged(first, second)
+        try expect(abs((even?.ttft ?? 0) - 5) < 0.15,
+                   "偶数样本跨设备合并时，两项中间观测值都要参与中位数，1 秒与 9 秒应接近 5 秒")
+        try expect(even?.tps == 100, "TTFT 修正不改变输出速度")
 
         let old = PerfModelStat(tps: 50, ttft: nil, n: 1)
         let mixed = old.merged(with: PerfModelStat(tps: 100, ttft: 2, n: 3))

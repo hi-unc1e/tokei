@@ -133,8 +133,9 @@ class QwenWorkQuotaTests(unittest.TestCase):
             self.assertNotIn(token, config["marker"])
 
             path = Path(USAGE.QWENWORK_MCP_CONFIG)
-            path.chmod(0o644)
-            self.assertIsNone(USAGE._read_qwenwork_mcp_config())
+            if not USAGE._IS_WINDOWS:
+                path.chmod(0o644)
+                self.assertIsNone(USAGE._read_qwenwork_mcp_config())
             path.chmod(0o600)
             path.write_text(json.dumps({
                 "url": "http://localhost:54365", "token": token,
@@ -150,6 +151,38 @@ class QwenWorkQuotaTests(unittest.TestCase):
             target.chmod(0o600)
             path.symlink_to(target)
             self.assertIsNone(USAGE._read_qwenwork_mcp_config())
+
+    def test_config_rejects_symlinks_without_o_nofollow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure(root)
+            path = Path(USAGE.QWENWORK_MCP_CONFIG)
+            target = root / "target.json"
+            path.replace(target)
+            path.symlink_to(target)
+            with mock.patch.object(USAGE, "_IS_WINDOWS", True), \
+                    mock.patch.object(USAGE.os, "O_NOFOLLOW", 0, create=True), \
+                    mock.patch.object(USAGE.os, "open", wraps=USAGE.os.open) as opened:
+                self.assertIsNone(USAGE._read_qwenwork_mcp_config())
+                opened.assert_not_called()
+
+    def test_config_rejects_file_replaced_between_stat_and_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure(root)
+            path = Path(USAGE.QWENWORK_MCP_CONFIG)
+            replacement = root / "replacement.json"
+            replacement.write_bytes(path.read_bytes())
+            replacement.chmod(0o600)
+            real_open = USAGE.os.open
+
+            def replace_before_open(filename, flags):
+                replacement.replace(path)
+                return real_open(filename, flags)
+
+            with mock.patch.object(USAGE, "_IS_WINDOWS", True), \
+                    mock.patch.object(USAGE.os, "open", side_effect=replace_before_open):
+                self.assertIsNone(USAGE._read_qwenwork_mcp_config())
 
     def test_normalizes_real_shape_without_double_counting_alias(self):
         quota = USAGE._normalize_qwenwork_usage(self.real_shape(), updated=1_786_650_000)
@@ -296,7 +329,8 @@ class QwenWorkQuotaTests(unittest.TestCase):
             cache_path = Path(USAGE.QWENWORK_QUOTA_CACHE)
             cache_text = cache_path.read_text(encoding="utf-8")
             self.assertNotIn(token, cache_text)
-            self.assertEqual(stat.S_IMODE(cache_path.stat().st_mode), 0o600)
+            if not USAGE._IS_WINDOWS:
+                self.assertEqual(stat.S_IMODE(cache_path.stat().st_mode), 0o600)
 
             with mock.patch.object(USAGE, "_qwenwork_mcp_rpc") as rpc:
                 cached = USAGE.scan_qwenwork_quota()

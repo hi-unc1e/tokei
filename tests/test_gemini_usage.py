@@ -311,7 +311,9 @@ class AntigravityRobustnessTests(unittest.TestCase):
 
     def test_question_mark_in_path_cannot_override_read_only_mode(self):
         # f"file:{path}?mode=ro" 会被路径里的 ? 截断,mode 可被改成 rwc。
-        path = self._write_db([self._step(1780000000)], dirname="proj?mode=rwc&x=")
+        # Windows 文件名不允许 ?，但同样需要转义 #、% 和空格。
+        dirname = "proj # % mode=rwc&x=" if USAGE._IS_WINDOWS else "proj?mode=rwc&x="
+        path = self._write_db([self._step(1780000000)], dirname=dirname)
         parsed = USAGE._load_antigravity_db(path)
         self.assertIsNotNone(parsed)
         self.assertEqual(len(parsed["events"]), 1)

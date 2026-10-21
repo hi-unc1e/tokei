@@ -1,3 +1,4 @@
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -9,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProviderCredentialStoreTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_legacy_keychain_round_trip_is_noninteractive(self):
         swiftc = shutil.which("swiftc")
         if swiftc is None:

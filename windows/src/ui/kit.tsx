@@ -82,7 +82,7 @@ export function CardHead({
           flex: "none",
         }}
       />
-      <span style={{ fontSize: fs(14), fontWeight: 700, color: T.primary, whiteSpace: "nowrap" }}>{title}</span>
+      <span className="card-title" style={{ fontSize: fs(14), fontWeight: 700, color: T.primary }}>{title}</span>
       {sessions > 0 && (
         <span
           style={{
@@ -92,6 +92,7 @@ export function CardHead({
             padding: "1.5px 5px",
             borderRadius: 999,
             background: rgba(tint, 0.12),
+            flexShrink: 0,
           }}
         >
           {sessions}
@@ -129,7 +130,7 @@ export const metric = (icon: string, label: string, value: string, help?: string
 
 export function MetricCell({ m, tint }: { m: Metric; tint: RGB }) {
   return (
-    <div title={m.help} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+    <div data-metric={JSON.stringify([m.icon, m.label])} title={m.help} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
       <span
         style={{
           width: 21,
@@ -145,11 +146,11 @@ export function MetricCell({ m, tint }: { m: Metric; tint: RGB }) {
         <Icon name={m.icon} size={fs(10.5)} strokeWidth={2.6} />
       </span>
       <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
-        <span style={{ fontSize: fs(9.5), color: T.tertiary, display: "flex", alignItems: "center", gap: 3, whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: fs(9.5), color: T.tertiary, display: "flex", alignItems: "center", gap: 3, overflowWrap: "anywhere" }}>
           {m.label}
           {m.help && <Icon name="info.circle" size={fs(8.5)} strokeWidth={2} />}
         </span>
-        <span style={{ fontSize: fs(12.5), fontWeight: 600, fontFamily: MONO, color: T.primary, whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: fs(12.5), fontWeight: 600, fontFamily: MONO, color: T.primary, overflowWrap: "anywhere" }}>
           {m.value}
         </span>
       </div>
@@ -194,14 +195,16 @@ export function RingMetricCell({ value, label, tint }: { value: number; label: s
 
 /** 两列指标格：top 在前，命中率环（hit>0 时）其后，再接 extra。 */
 export function MetricGrid({ top = [], hit = 0, extra = [], tint }: { top?: Metric[]; hit?: number; extra?: Metric[]; tint: RGB }) {
+  const cells = [
+    ...top.map((m) => ({ id: `metric:${JSON.stringify([m.icon, m.label])}`, metric: m })),
+    ...(hit > 0 ? [{ id: "cache-hit", metric: null }] : []),
+    ...extra.map((m) => ({ id: `metric:${JSON.stringify([m.icon, m.label])}`, metric: m })),
+  ];
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 10, rowGap: 9 }}>
-      {top.map((m, i) => (
-        <MetricCell key={`t${i}`} m={m} tint={tint} />
-      ))}
-      {hit > 0 && <RingMetricCell value={hit} label="Cache Hit" tint={tint} />}
-      {extra.map((m, i) => (
-        <MetricCell key={`e${i}`} m={m} tint={tint} />
+    <div data-metric-grid style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", columnGap: 10, rowGap: 9 }}>
+      {cells.map((cell) => (
+        cell.metric ? <MetricCell key={cell.id} m={cell.metric} tint={tint} />
+          : <RingMetricCell key={cell.id} value={hit} label="Cache Hit" tint={tint} />
       ))}
     </div>
   );
@@ -400,9 +403,11 @@ export function perfMetrics(perf: PerfStat | null | undefined, includeTTFT = tru
   const items: Metric[] = [
     metric(
       "gauge.medium",
-      L("平均输出速度"),
+      (perf.en ?? 0) > 0 ? L("平均输出速度（含等待）") : L("平均输出速度"),
       Fmt.tps(perf.tps),
-      L("输出 token 总数 ÷ 生成总时长，来自 %@ 个请求；拿不到首字时间的请求按整个请求的耗时算", perf.n),
+      (perf.en ?? 0) > 0
+        ? L("输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度", perf.n, perf.en)
+        : L("输出 token 总数 ÷ 生成总时长，来自 %@ 个请求；拿不到首字时间的请求按整个请求的耗时算", perf.n),
     ),
   ];
   if (includeTTFT && perf.ttft != null) {
@@ -441,4 +446,7 @@ export function Disclosure({
 export function useToggle(initial = false): [boolean, () => void] {
   const [value, setValue] = useState(initial);
   return [value, () => setValue((v) => !v)];
+}
+export function QuotaLoading() {
+  return <HStack gap={8}><span className="spinner" /><span style={{ fontSize: fs(10), color: T.secondary }}>{L("额度更新中…")}</span></HStack>;
 }

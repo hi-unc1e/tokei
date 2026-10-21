@@ -1,3 +1,4 @@
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ TOKEI_SRC = ROOT / "Tokei" / "Sources" / "Tokei"
 
 
 class MenuBarQuotaSourceTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_codex_5h_source_is_opt_in_and_does_not_disturb_weekly(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "menu-bar-quota-check"

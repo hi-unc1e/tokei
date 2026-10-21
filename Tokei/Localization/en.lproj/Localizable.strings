@@ -601,3 +601,6 @@
 "暂无" = "None yet";
 "(无)" = "(None)";
 "（无）" = "(None)";
+"平均速度（含等待）" = "Avg speed (incl. waiting)";
+"平均输出速度（含等待）" = "Avg output speed (incl. waiting)";
+"输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度" = "Output tokens ÷ elapsed time; %@ of %@ requests included first-token waiting, pure generation speed cannot be recovered";

@@ -257,6 +257,8 @@ CMDCODE_DIR = os.path.abspath(os.path.expanduser(
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
+if _IS_WINDOWS and os.path.isabs(os.environ.get("TOKEI_WINDOWS_STATE_DIR", "")):
+    _USER_DIR = os.environ["TOKEI_WINDOWS_STATE_DIR"]
 
 def _writable_path(name):
     """优先用 ~/.tokei/ 下的可写副本,没有则用脚本同目录(开发模式)。"""
@@ -1314,7 +1316,7 @@ def ledger_flush():
     每轮扫描只调一次,替代此前每工具一次的 15 轮锁+读+写(性能回归根因)。"""
     if not _LEDGER_CACHE["dirty"] or _LEDGER_CACHE["data"] is None:
         return
-    if not _LEDGER_CACHE.get("urgent"):
+    if not _LEDGER_CACHE.get("urgent") and _LEDGER_TODAY_FLUSH_INTERVAL > 0:
         try:
             if _time.time() - os.path.getmtime(_LEDGER_FILE) < _LEDGER_TODAY_FLUSH_INTERVAL:
                 return
@@ -1534,6 +1536,8 @@ def _ledger_perf_values(left, right, subtract=False):
         for field in ("o", "n"):
             value = int(a.get(field, 0) or 0) + sign * int(b.get(field, 0) or 0)
             stats[field] = max(value, 0)
+        if "en" in a or "en" in b:
+            stats["en"] = max(int(a.get("en", 0) or 0) + sign * int(b.get("en", 0) or 0), 0)
         stats["g"] = max(round(float(a.get("g", 0) or 0) + sign * float(b.get("g", 0) or 0), 3), 0.0)
         for key in ("th", "t"):
             hist_a, hist_b = a.get(key), b.get(key)
@@ -1997,7 +2001,7 @@ def _iter_cached_token_days(tool_cache):
 # 生成秒数：拿得到首字时间就从首字算到输出结束（纯生成），拿不到就从请求开始算（端到端）。
 # 平均输出速度 = 输出 token 总数 ÷ 生成总秒数，存累加值 o/g/n，合并后再相除，是精确的。
 # TTFT 有长尾（排队、压缩上下文能等上几十秒），平均值会被少数请求拉高，所以取中位数：
-# 存成按 5% 等比分桶的直方图 "th"，桶内插值的误差在 0.1 秒显示精度以内，跨天、跨设备可直接相加。
+# 存成按 5% 等比分桶的直方图 "th"，桶内插值得到近似中位数，跨天、跨设备可直接相加。
 _PERF_MIN_OUTPUT = 20       # 输出太少的请求，时间基本都花在网络和排队上，速度没有意义
 _PERF_MAX_TPS = 3000.0      # 比这还快说明时间戳不可信
 _PERF_MAX_SECONDS = 1800.0  # 单个请求超过半小时，多半是中途挂起或时间戳错位
@@ -2023,11 +2027,11 @@ def _perf_ttft_bounds(bucket):
             _PERF_TTFT_BASE * _PERF_TTFT_RATIO ** bucket)
 
 
-def _perf_add(perf, model, out_tokens, gen_seconds, ttft_seconds=None):
+def _perf_add(perf, model, out_tokens, gen_seconds, ttft_seconds=None, *, includes_wait=False):
     try:
         out = int(out_tokens or 0)
         gen = float(gen_seconds or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
     if out < _PERF_MIN_OUTPUT or not 0.2 < gen <= _PERF_MAX_SECONDS or out / gen > _PERF_MAX_TPS:
         return False
@@ -2035,6 +2039,8 @@ def _perf_add(perf, model, out_tokens, gen_seconds, ttft_seconds=None):
     stats["o"] += out
     stats["g"] = round(stats["g"] + gen, 3)
     stats["n"] += 1
+    if includes_wait:
+        stats["en"] = stats.get("en", 0) + 1
     try:
         ttft = float(ttft_seconds) if ttft_seconds is not None else None
     except (TypeError, ValueError):
@@ -2054,6 +2060,8 @@ def _perf_merge(dst, src):
         target["o"] += int(stats.get("o", 0) or 0)
         target["g"] = round(target["g"] + float(stats.get("g", 0) or 0), 3)
         target["n"] += int(stats.get("n", 0) or 0)
+        if stats.get("en"):
+            target["en"] = int(target.get("en", 0) or 0) + int(stats["en"])
         for key in ("th", "t"):
             for bucket, count in (stats.get(key) or {}).items():
                 hist = target.setdefault(key, {})
@@ -2093,17 +2101,22 @@ def _perf_ttft_histogram(stats):
 
 
 def _perf_ttft_median(hist):
-    total = sum(hist.values())
+    buckets = sorted((bucket, count) for bucket, count in hist.items() if count > 0)
+    total = sum(count for _, count in buckets)
     if not total:
         return None
-    half, seen = total / 2, 0
-    for bucket in sorted(hist):
-        count = hist[bucket]
-        if count and seen + count >= half:
-            low, high = _perf_ttft_bounds(bucket)
-            return round(low + (high - low) * ((half - seen) / count), 2)
-        seen += count
-    return None
+
+    def at_rank(rank):
+        seen = 0
+        for bucket, count in buckets:
+            if seen + count >= rank:
+                low, high = _perf_ttft_bounds(bucket)
+                return low + (high - low) * ((rank - seen - 0.5) / count)
+            seen += count
+
+    # Even sample counts need both middle observations, including when they
+    # fall in different buckets. Odd counts use the same rank twice.
+    return round((at_rank((total + 1) // 2) + at_rank((total + 2) // 2)) / 2, 2)
 
 
 def _perf_summary(perf, name=None):
@@ -2128,7 +2141,8 @@ def _perf_summary(perf, name=None):
         hist = _perf_ttft_histogram(stats)
         return {"tps": round(stats["o"] / stats["g"], 1), "ttft": _perf_ttft_median(hist),
                 "n": stats["n"], "o": stats["o"], "g": round(stats["g"], 3),
-                "tn": sum(hist.values()), "th": {str(bucket): hist[bucket] for bucket in sorted(hist)}}
+                "tn": sum(hist.values()), "th": {str(bucket): hist[bucket] for bucket in sorted(hist)},
+                "en": min(int(stats.get("en", 0) or 0), stats["n"])}
 
     overall = one(total.get("*"))
     if not overall:
@@ -4412,7 +4426,7 @@ def _codex_perf_backfill_targets(file_cache, paths, now=None):
     return targets
 
 
-def scan_codex(bounds, cache):
+def scan_codex(bounds, cache, local_only=False):
     ledger_touch("codex")
     fc = cache.setdefault("codex", {})
     if _codex_migrate_event_cache(fc):
@@ -4897,7 +4911,7 @@ def scan_codex(bounds, cache):
     # 读数时间:live 真正胜出时用抓取时刻,否则用日志里那条记录的时间。
     # live_updated 只在 if live 分支内有定义,先在外面兜底。
     limits_updated = _iso_to_epoch(selected_limits_ts)
-    live = fetch_codex_live_limits()
+    live = None if local_only else fetch_codex_live_limits()
     if live:
         live_limits, live_plan, live_updated = live
         if _codex_live_snapshot_is_current(live_updated, selected_limits_ts):
@@ -5650,8 +5664,8 @@ def _grok_usage_cost(record, model):
     return cost
 
 
-# 1：记录附上推理耗时，升级后整份重读一次（文件只有几 MB）。
-_GROK_USAGE_VERSION = 1
+# 2：复用前核对文件身份和内容边界，兼容 Windows 原地改写时的时间戳精度。
+_GROK_USAGE_VERSION = 2
 
 
 def _load_grok_usage_records(cache):
@@ -5668,7 +5682,11 @@ def _load_grok_usage_records(cache):
     signature = f"{stat.st_mtime_ns}:{stat.st_size}"
     complete_offset = _codex_complete_offset(GROK_LOG, stat.st_size)
     file_id = f"{stat.st_dev}:{stat.st_ino}"
+    complete_guard = _codex_offset_guard(GROK_LOG, complete_offset)
     if (old.get("sig") == signature
+            and old.get("file_id") == file_id
+            and complete_guard is not None
+            and old.get("parsed_guard") == complete_guard
             and int(old.get("parsed_size", 0) or 0) == complete_offset):
         return list(old.get("records") or [])
 
@@ -5709,7 +5727,7 @@ def _load_grok_usage_records(cache):
         "sig": signature,
         "file_id": file_id,
         "parsed_size": complete_offset,
-        "parsed_guard": _codex_offset_guard(GROK_LOG, complete_offset),
+        "parsed_guard": complete_guard,
         "records": records,
     }
     if updated != old:
@@ -6084,9 +6102,14 @@ def _read_qwenwork_mcp_config(path=None):
         flags |= os.O_NOFOLLOW
     fd = None
     try:
+        # Windows 没有 O_NOFOLLOW；打开前检查链接，打开后核对同一个文件。
+        before = os.lstat(config_path)
+        if not stat.S_ISREG(before.st_mode):
+            return None
         fd = os.open(config_path, flags)
         info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode)
+        if ((info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)
+                or not stat.S_ISREG(info.st_mode)
                 or info.st_size <= 0
                 or info.st_size > _QWENWORK_MCP_MAX_CONFIG_BYTES):
             return None
@@ -6483,6 +6506,8 @@ def _provider_quota_enabled(provider):
     if env == "1":
         return True
     default = provider in ("antigravity", "devin")
+    if provider == "claude_cli":
+        return _tokei_config().get("claude_cli_quota_enabled") is True
     return bool(_tokei_config().get(f"{provider}_quota_enabled", default))
 
 
@@ -7110,6 +7135,13 @@ def _normalize_cursor_quota(summary, *, request_usage=None, sand_usage=None, use
 
 
 def _grok_bot_active_account_id(path=None):
+    if _IS_WINDOWS and path is None:
+        bridge = _windows_native_bridge()
+        if bridge:
+            try:
+                return bridge.grok_metadata()[2]
+            except (OSError, ValueError, bridge.BridgeError):
+                return None
     secrets_path = path or _first_existing_file(GROK_BOT_SECRET_PATHS)
     if not secrets_path or not os.path.isfile(secrets_path):
         return None
@@ -7128,6 +7160,52 @@ def _grok_bot_active_account_id(path=None):
     if not isinstance(active, str) or not re.fullmatch(r"[0-9a-f]{64}", active):
         return None
     return active if isinstance(accounts, dict) and isinstance(accounts.get(active), dict) else None
+
+
+def _grok_bot_authorized_identity():
+    if not _provider_quota_enabled("grok_bot"):
+        return None
+    bridge = _windows_native_bridge()
+    if bridge is None:
+        return None
+    try:
+        _, _, account, profile = bridge.grok_metadata()
+        bridge.matching_grant(account, profile)
+    except (OSError, ValueError, bridge.BridgeError):
+        return None
+    return account, profile
+
+
+def _grok_bot_provider_days_cache_key():
+    if not _IS_WINDOWS:
+        return _GROK_BOT_PROVIDER_DAYS_CACHE_KEY
+    identity = _grok_bot_authorized_identity()
+    if identity is None:
+        return None
+    # 无法确定旧版全局缓存属于哪个账号，保留原文件但不归入当前账号。
+    scope = _provider_credential_marker("grok-bot-days-v1", *identity)
+    return _GROK_BOT_PROVIDER_DAYS_CACHE_KEY + ":" + scope
+
+
+def _merge_grok_bot_provider_days(cache, provider_quotas, cache_key):
+    if cache_key is None or (_IS_WINDOWS and cache_key != _grok_bot_provider_days_cache_key()):
+        provider_quotas["grok_bot"] = {}
+        return
+    _merge_dashboard_days(
+        cache, cache_key,
+        ((provider_quotas.get("grok_bot") or {}).get("usage") or {}).get("days", {}))
+    days = cache.get(cache_key)
+    if not isinstance(days, dict) or not days:
+        return
+    quota = dict(provider_quotas.get("grok_bot") or {})
+    if not quota:
+        quota = {
+            "available": False, "plan": None, "account": None,
+            "windows": [], "details": [], "source": "cache",
+            "updated": None, "stale": True,
+        }
+    quota["usage"] = _provider_usage_from_days(days)
+    provider_quotas["grok_bot"] = quota
 
 
 def _grok_bot_authorization_generation(path=None):
@@ -7178,6 +7256,30 @@ def _grok_bot_helper_files():
             os.path.join(directory, "grok_bot_helper.state.json"))
 
 
+_WINDOWS_NATIVE_BRIDGE = None
+
+
+def _windows_native_bridge():
+    global _WINDOWS_NATIVE_BRIDGE
+    if not _IS_WINDOWS:
+        return None
+    if _WINDOWS_NATIVE_BRIDGE is None:
+        import importlib.util
+        candidates = [os.path.join(BASE_DIR, "windows_native.py"),
+                      os.path.join(BASE_DIR, "windows", "native_bridge.py")]
+        path = next((p for p in candidates if os.path.isfile(p)), None)
+        if not path:
+            return None
+        try:
+            spec = importlib.util.spec_from_file_location("tokei_windows_native", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _WINDOWS_NATIVE_BRIDGE = module
+        except (OSError, ImportError):
+            return None
+    return _WINDOWS_NATIVE_BRIDGE
+
+
 def _grok_bot_helper_running(state):
     pid, started = state.get("pid"), state.get("started")
     if not isinstance(pid, int) or not isinstance(started, (int, float)):
@@ -7185,7 +7287,23 @@ def _grok_bot_helper_running(state):
     if _time.time() - started > _GROK_BOT_HELPER_MAX_RUNTIME:
         return False
     if _IS_WINDOWS:
-        return False  # Windows 上 os.kill(pid, 0) 会直接结束进程，而且这里不会有助手
+        # Windows 上 os.kill(pid, 0) 会结束进程；只查询进程状态。
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5
+        try:
+            code = wintypes.DWORD()
+            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259)
+        finally:
+            kernel.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -7224,13 +7342,19 @@ def _grok_bot_helper_take_result(marker):
 # 用量事件按天存在额度缓存旁边：今年已有上万条，每次从年初全量拉既慢又会撞上
 # 辅助程序的翻页上限。平时只拉最近两天（--since 那天零点起），这两天整天替换，
 # 更早的日子原样留着；还没有存档时才从年初拉一次。只留今年的，跨年自动清掉。
-def _grok_bot_event_dir():
-    return os.path.join(os.path.dirname(PROVIDER_QUOTA_CACHE) or ".", "grok_bot_events")
+def _grok_bot_event_dir(identity=None):
+    directory = os.path.join(os.path.dirname(PROVIDER_QUOTA_CACHE) or ".", "grok_bot_events")
+    if _IS_WINDOWS:
+        # Windows 授权按账号隔离，切换登录后不混用其他账号的官方事件。
+        identity = identity or _grok_bot_authorized_identity()
+        scope = _provider_credential_marker("grok-bot-days-v1", *identity) if identity else "unavailable"
+        return os.path.join(directory, scope)
+    return directory
 
 
-def _grok_bot_stored_days():
+def _grok_bot_stored_days(directory=None):
     """{日期: 事件文件路径}，只算今年的。"""
-    directory = _grok_bot_event_dir()
+    directory = directory or _grok_bot_event_dir()
     year = str(date.today().year)
     days = {}
     try:
@@ -7254,14 +7378,21 @@ def _grok_bot_events_since():
     return int(datetime.combine(start, datetime.min.time()).timestamp() * 1000)
 
 
-def _grok_bot_merge_events(payload):
+def _grok_bot_merge_events(payload, *, expected_identity=None):
     """把这次拉到的事件并进按天的存档，返回换成全年事件的 payload。
 
     拉取窗口从某天零点开始时，窗口内的日子整天替换（拉到的就是那几天的全部）；
     旧版辅助程序不认 --since、从年初拉，同样按整段替换处理。"""
     if not isinstance(payload, dict):
         return payload
-    directory = _grok_bot_event_dir()
+    if _IS_WINDOWS:
+        identity = (payload.get("_tokei_account"), payload.get("_tokei_profile"))
+        if expected_identity is None or identity != expected_identity \
+                or identity != _grok_bot_authorized_identity():
+            return None
+        directory = _grok_bot_event_dir(identity)
+    else:
+        directory = _grok_bot_event_dir()
     year = date.today().year
     events = payload.get("usageEventsDisplay")
     if payload.get("usageFetched") is True and isinstance(events, list):
@@ -7281,7 +7412,7 @@ def _grok_bot_merge_events(payload):
                 if day.year == year:
                     by_day.setdefault(day.isoformat(), []).append(event)
             os.makedirs(directory, mode=0o700, exist_ok=True)
-            stored = _grok_bot_stored_days()
+            stored = _grok_bot_stored_days(directory)
             for day, path in stored.items():
                 if day >= first_full_day.isoformat() and day not in by_day:
                     try:
@@ -7321,7 +7452,7 @@ def _grok_bot_merge_events(payload):
             except OSError:
                 pass
     stored_events = []
-    for _, path in sorted(_grok_bot_stored_days().items()):
+    for _, path in sorted(_grok_bot_stored_days(directory).items()):
         loaded = _load_json(path, [])
         if isinstance(loaded, list):
             stored_events.extend(event for event in loaded if isinstance(event, dict))
@@ -7333,7 +7464,8 @@ def _grok_bot_merge_events(payload):
 
 def _grok_bot_helper_start(marker):
     """后台没在跑就启动一次辅助程序。返回 (是否有一次在跑, 是不是这次启动的)。"""
-    helper = _grok_bot_helper_path()
+    bridge = _windows_native_bridge() if _IS_WINDOWS else None
+    helper = bridge.__file__ if bridge else _grok_bot_helper_path()
     if not helper or not marker:
         return False, False
     result_path, state_path = _grok_bot_helper_files()
@@ -7346,12 +7478,20 @@ def _grok_bot_helper_start(marker):
     since_args = '--since "$3"' if since is not None else ""
     try:
         os.makedirs(os.path.dirname(result_path) or ".", mode=0o700, exist_ok=True)
-        process = subprocess.Popen(
-            ["/bin/sh", "-c",
-             f'umask 077; "$0" --grok-bot-data-json {since_args} > "$1" && mv -f "$1" "$2" || rm -f "$1"',
-             helper, temporary, result_path, str(since or "")],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True, close_fds=True)
+        if _IS_WINDOWS:
+            args = [sys.executable, helper, "grok-data", "--result", result_path]
+            if since is not None:
+                args.extend(["--since", str(since)])
+            process = subprocess.Popen(args, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=0x08000000, close_fds=True)
+        else:
+            process = subprocess.Popen(
+                ["/bin/sh", "-c",
+                 f'umask 077; "$0" --grok-bot-data-json {since_args} > "$1" && mv -f "$1" "$2" || rm -f "$1"',
+                 helper, temporary, result_path, str(since or "")],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True, close_fds=True)
     except OSError:
         return False, False
     _atomic_write_json(state_path, {"pid": process.pid, "started": int(_time.time()), "marker": marker})
@@ -7601,7 +7741,15 @@ def _grok_bot_usage_only_fallback():
 
 
 def fetch_grok_bot_quota(session=None):
-    native_fallback = _latest_cached_provider_quota(
+    windows_identity = None
+    if _IS_WINDOWS:
+        bridge = _windows_native_bridge()
+        if bridge is None or bridge.grok_status().get("status") != "authorized":
+            return None
+        windows_identity = _grok_bot_authorized_identity()
+        if windows_identity is None:
+            return None
+    native_fallback = None if _IS_WINDOWS else _latest_cached_provider_quota(
         "grok_bot", _PROVIDER_QUOTA_FALLBACK_TTL, stale=True) \
         or _grok_bot_usage_only_fallback()
     if session is None:
@@ -7626,7 +7774,7 @@ def fetch_grok_bot_quota(session=None):
             if cached:
                 finished = _grok_bot_helper_take_result(native_marker)
                 fresh = _grok_bot_provider_data(
-                    _grok_bot_merge_events(finished), updated=finished.get("updated")) \
+                    _grok_bot_merge_events(finished, expected_identity=windows_identity), updated=finished.get("updated")) \
                     if finished is not None else None
                 if fresh:
                     _save_provider_quota_cache("grok_bot", native_marker, fresh)
@@ -7648,7 +7796,7 @@ def fetch_grok_bot_quota(session=None):
                     return native_fallback   # 后台还在拉，先用上一次的结果
                 if payload is not None:
                     quota = _grok_bot_provider_data(
-                        _grok_bot_merge_events(payload), updated=payload.get("updated"))
+                        _grok_bot_merge_events(payload, expected_identity=windows_identity), updated=payload.get("updated"))
                     if quota:
                         _save_provider_quota_cache("grok_bot", native_marker, quota)
                         return quota
@@ -7658,6 +7806,9 @@ def fetch_grok_bot_quota(session=None):
                         return {}
                 _save_provider_quota_attempt("grok_bot", native_marker)
 
+    if _IS_WINDOWS:
+        # 查询 Grok Bot 自身账号；没有授权时不借用其他应用的账号。
+        return native_fallback
     session = session or _cursor_session()
     if not session:
         return native_fallback
@@ -10723,6 +10874,28 @@ def _pi_stream_seconds(persisted, started):
     return seconds if 0.2 < seconds <= _PERF_MAX_SECONDS else None
 
 
+def _pi_request_timing(record, message):
+    """Prefer recorded request timing (Pi-compatible clients use milliseconds).
+
+    Standard Pi sessions only preserve request-start and persistence timestamps.
+    Their rate includes first-token wait and must stay marked as end-to-end.
+    Clients that persist duration/ttft can supply generation time directly.
+    """
+    def milliseconds(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return value / 1000 if math.isfinite(value) and value >= 0 else None
+
+    duration = milliseconds(message.get("duration"))
+    ttft = milliseconds(message.get("ttft"))
+    if duration is not None and 0.2 < duration <= _PERF_MAX_SECONDS:
+        if ttft is not None and ttft < duration:
+            return duration - ttft, ttft, False
+        return duration, None, True
+    seconds = _pi_stream_seconds(record.get("timestamp"), message.get("timestamp"))
+    return (seconds, None, True) if seconds else None
+
+
 def _pi_usage_cost(u, model):
     cost_obj = u.get("cost") or {}
     total = float(cost_obj.get("total", 0) or 0)
@@ -10747,7 +10920,8 @@ def _pi_usage_cost(u, model):
 # 2：不带厂商前缀的模型名按名字到价目表里查价。3：没有的沿用上一个版本的价。
 # 4：附上每条回复的端到端耗时。
 # 5：经网关选路由组时按回包里真正作答的模型归因（responseModel）。
-_PI_PARSER_VERSION = 5
+# 6：优先读取 duration/ttft；标准 Pi 的时间戳差标为含首字等待的端到端速率。
+_PI_PARSER_VERSION = 6
 
 
 def scan_pi(bounds, cache):
@@ -10817,9 +10991,11 @@ def scan_pi(bounds, cache):
                         dk = dt.astimezone().date().isoformat()
                         day = days.setdefault(dk, _empty_token_day())
                         _add_token_usage(day, inp, out, cr, cw, reason, cost, model)
-                        seconds = _pi_stream_seconds(o.get("timestamp"), msg.get("timestamp"))
-                        if seconds:
-                            _perf_add(day.setdefault("perf", {}), model, out, seconds)
+                        timing = _pi_request_timing(o, msg)
+                        if timing:
+                            seconds, ttft, includes_wait = timing
+                            _perf_add(day.setdefault("perf", {}), model, out, seconds, ttft,
+                                      includes_wait=includes_wait)
                         day["hours"][dt.astimezone().hour] += inp + out + cr + cw + reason
             except OSError:
                 continue
@@ -10844,7 +11020,8 @@ def scan_pi(bounds, cache):
             for k in classify_date(d, bounds):
                 B[k]["sessions"].add(session)
 
-    for dk, day in ledger_reconcile("pi", live_days, _ledger_file_sources(fc, "sid")).items():
+    for dk, day in ledger_reconcile("pi", live_days, _ledger_file_sources(
+            fc, "sid", accounting_version=_PI_PARSER_VERSION)).items():
         try:
             d = date.fromisoformat(dk)
         except ValueError:
@@ -14706,16 +14883,21 @@ def _scan_claude_plan_raw(now=None):
 
 
 def scan_claude_plan():
-    return _claude_quota_from_environment() or _scan_claude_plan_raw()
+    quota = _claude_quota_from_environment() or _scan_claude_plan_raw()
+    if _IS_WINDOWS and _provider_quota_enabled("claude_cli"):
+        bridge = _windows_native_bridge()
+        if bridge:
+            quota = bridge.fetch_claude_quota(quota or {})
+    return quota
 
 
 @_with_scan_cache_lock
-def compute():
+def compute(local_only=False):
     bounds = range_bounds()
     cache = _load_scan_cache()
     errors = {}
     cc = _safe_scan("claude", lambda: scan_claude(bounds, cache), _empty_claude, errors)
-    cx = _safe_scan("codex", lambda: scan_codex(bounds, cache), _empty_codex, errors)
+    cx = _safe_scan("codex", lambda: scan_codex(bounds, cache, local_only=local_only), _empty_codex, errors)
     gm = _safe_scan("gemini", lambda: scan_gemini(bounds, cache), _empty_gemini, errors)
     gk = _safe_scan("grok", lambda: scan_grok(bounds, cache), _empty_grok, errors)
     qd = _safe_scan("qoderwork", lambda: scan_qoder(bounds, cache), _empty_qoder, errors)
@@ -14928,37 +15110,34 @@ def compute():
     p5, pw = quota["p5"], quota["pw"]
     r5, rw = quota["r5"], quota["rw"]
 
-    plan = _safe_scan("claude_plan", scan_claude_plan, lambda: {}, errors) or {}
-    grok_quota = _safe_scan("grok_quota", scan_grok_quota, lambda: {}, errors) or {}
-    qwenwork_quota = _safe_scan(
-        "qwenwork_quota", scan_qwenwork_quota, lambda: {}, errors) or {}
-    kimi_live = _safe_scan("kimi_quota", fetch_kimi_live_limits, lambda: None, errors)
-    kimi_limits, kimi_plan, kimi_updated = kimi_live if kimi_live else (None, None, None)
-    kimi_quota = _kimi_quota_values(kimi_limits, updated_at=kimi_updated)
-    provider_quotas = scan_provider_quotas(errors)
-    _cache_dashboard_days(
-        cache, _CURSOR_PROVIDER_DAYS_CACHE_KEY,
-        ((provider_quotas.get("cursor") or {}).get("usage") or {}).get("days", {}))
-    _cache_dashboard_days(
-        cache, _ZAI_PROVIDER_DAYS_CACHE_KEY,
-        ((provider_quotas.get("zai") or {}).get("usage") or {}).get("days", {}))
-    _merge_dashboard_days(
-        cache, _GROK_BOT_PROVIDER_DAYS_CACHE_KEY,
-        ((provider_quotas.get("grok_bot") or {}).get("usage") or {}).get("days", {}))
-    grok_bot_days = cache.get(_GROK_BOT_PROVIDER_DAYS_CACHE_KEY)
-    if isinstance(grok_bot_days, dict) and grok_bot_days:
-        grok_bot_quota = dict(provider_quotas.get("grok_bot") or {})
-        if not grok_bot_quota:
-            grok_bot_quota = {
-                "available": False, "plan": None, "account": None,
-                "windows": [], "details": [], "source": "cache",
-                "updated": None, "stale": True,
-            }
-        grok_bot_quota["usage"] = _provider_usage_from_days(grok_bot_days)
-        provider_quotas["grok_bot"] = grok_bot_quota
-    _save_scan_cache(cache)
-    codex_reset_cards = _safe_scan(
-        "codex_reset_cards", fetch_codex_reset_cards, lambda: {}, errors) or {}
+    # Windows 首屏先读本地用量；网络额度查询和授权助手留给完整刷新。
+    if local_only:
+        plan, grok_quota, qwenwork_quota = {}, {}, {}
+        kimi_plan = kimi_updated = None
+        kimi_quota = _kimi_quota_values(None)
+        provider_quotas = {name: {} for name in (
+            "zed", "sub2api", "zai", "antigravity", "devin", "minimax", "cursor", "grok_bot")}
+        codex_reset_cards = {}
+    else:
+        plan = _safe_scan("claude_plan", scan_claude_plan, lambda: {}, errors) or {}
+        grok_quota = _safe_scan("grok_quota", scan_grok_quota, lambda: {}, errors) or {}
+        qwenwork_quota = _safe_scan(
+            "qwenwork_quota", scan_qwenwork_quota, lambda: {}, errors) or {}
+        kimi_live = _safe_scan("kimi_quota", fetch_kimi_live_limits, lambda: None, errors)
+        kimi_limits, kimi_plan, kimi_updated = kimi_live if kimi_live else (None, None, None)
+        kimi_quota = _kimi_quota_values(kimi_limits, updated_at=kimi_updated)
+        grok_bot_cache_key = _grok_bot_provider_days_cache_key()
+        provider_quotas = scan_provider_quotas(errors)
+        _cache_dashboard_days(
+            cache, _CURSOR_PROVIDER_DAYS_CACHE_KEY,
+            ((provider_quotas.get("cursor") or {}).get("usage") or {}).get("days", {}))
+        _cache_dashboard_days(
+            cache, _ZAI_PROVIDER_DAYS_CACHE_KEY,
+            ((provider_quotas.get("zai") or {}).get("usage") or {}).get("days", {}))
+        _merge_grok_bot_provider_days(cache, provider_quotas, grok_bot_cache_key)
+        _save_scan_cache(cache)
+        codex_reset_cards = _safe_scan(
+            "codex_reset_cards", fetch_codex_reset_cards, lambda: {}, errors) or {}
 
     result = {
         "claude": {
@@ -15296,7 +15475,7 @@ def _write_configured_sync_snapshot(d):
 
 
 def main_json():
-    d = compute()
+    d = compute(local_only="--local-only" in sys.argv)
     meta = _load_json(PRICING_FILE, {}).get("_meta", {})
     d["_pricing"] = {"updated_at": meta.get("updated_at", ""), "count": meta.get("count", 0)}
     print(json.dumps(d, ensure_ascii=False))
@@ -16381,9 +16560,11 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             })
         return rows
 
-    model_list.extend(account_model_rows((
-        (_GROK_BOT_PROVIDER_DAYS_CACHE_KEY, "grok_bot", None),
-    )))
+    grok_bot_cache_key = _grok_bot_provider_days_cache_key()
+    if grok_bot_cache_key is not None:
+        model_list.extend(account_model_rows((
+            (grok_bot_cache_key, "grok_bot", None),
+        )))
     provider_model_list = account_model_rows((
         (_CURSOR_PROVIDER_DAYS_CACHE_KEY, "cursor", "Cursor 账号"),
         (_ZAI_PROVIDER_DAYS_CACHE_KEY, "zai", "z.ai 账号"),
@@ -17376,7 +17557,8 @@ def _recent_quota_detail_payload():
     try:
         with open(path, encoding="utf-8") as f:
             age = datetime.now().timestamp() - os.fstat(f.fileno()).st_mtime
-            if 0 <= age <= 60:
+            # Windows 的文件时间精度可能高于当前时钟读数，刚写完会暂时领先几毫秒。
+            if -1 <= age <= 60:
                 payload = json.load(f)
                 if isinstance(payload, dict) and all(
                         isinstance(payload.get(tool), dict) for tool, _ in _QUOTA_TOOLS):

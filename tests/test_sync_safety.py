@@ -42,7 +42,8 @@ class SyncSnapshotSafetyTests(unittest.TestCase):
             self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
             self.assertFalse(destination.is_symlink())
             self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), {"value": 42})
-            self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
+            if not USAGE._IS_WINDOWS:
+                self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
 
     def test_rejects_path_traversal_and_control_characters(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -43,18 +43,20 @@ final class PerfStat: Codable, Equatable {
     let tn: Int?
     let th: [String: Int]?
     let models: [String: PerfModelStat]?
+    let en: Int?
 
     init(tps: Double, ttft: Double?, n: Int, o: Int? = nil, g: Double? = nil, tn: Int? = nil,
-         th: [String: Int]? = nil, models: [String: PerfModelStat]? = nil) {
+         th: [String: Int]? = nil, models: [String: PerfModelStat]? = nil, en: Int? = nil) {
         self.tps = tps; self.ttft = ttft; self.n = n
         self.o = o; self.g = g; self.tn = tn; self.th = th; self.models = models
+        self.en = en
     }
 
     static func == (lhs: PerfStat, rhs: PerfStat) -> Bool {
         lhs.overall == rhs.overall && lhs.models == rhs.models
     }
 
-    var overall: PerfModelStat { .init(tps: tps, ttft: ttft, n: n, o: o, g: g, tn: tn, th: th) }
+    var overall: PerfModelStat { .init(tps: tps, ttft: ttft, n: n, o: o, g: g, tn: tn, th: th, en: en) }
 
     /// 按模型行的显示名找这一行的速度。两边名字出自同一套归并规则，但同一模型的大小写、
     /// 标点写法可能不完全一样（GLM-5.3 / glm 5.3），对不上时只比字母和数字。
@@ -79,7 +81,7 @@ final class PerfStat: Codable, Equatable {
             models[name] = models[name].map { $0.merged(with: stat) } ?? stat
         }
         return PerfStat(tps: total.tps, ttft: total.ttft, n: total.n, o: total.o, g: total.g,
-                        tn: total.tn, th: total.th, models: models.isEmpty ? nil : models)
+                        tn: total.tn, th: total.th, models: models.isEmpty ? nil : models, en: total.en)
     }
 }
 
@@ -91,10 +93,12 @@ struct PerfModelStat: Codable, Equatable {
     var g: Double? = nil
     var tn: Int? = nil
     var th: [String: Int]? = nil
+    var en: Int? = nil
 
     func merged(with other: PerfModelStat) -> PerfModelStat {
         let n = n + other.n
         var result = PerfModelStat(tps: 0, ttft: nil, n: n)
+        if en != nil || other.en != nil { result.en = (en ?? 0) + (other.en ?? 0) }
         if let o, let g, let otherO = other.o, let otherG = other.g, g + otherG > 0 {
             result.o = o + otherO
             result.g = g + otherG
@@ -126,17 +130,19 @@ struct PerfModelStat: Codable, Equatable {
             .filter { $0.1 > 0 }.sorted { $0.0 < $1.0 }
         let total = buckets.reduce(0) { $0 + $1.1 }
         guard total > 0 else { return nil }
-        let half = Double(total) / 2
-        var seen = 0.0
-        for (bucket, count) in buckets {
-            if seen + Double(count) >= half {
-                let low = bucket <= 0 ? 0 : 0.05 * pow(1.05, Double(bucket - 1))
-                let high = 0.05 * pow(1.05, Double(max(bucket, 0)))
-                return ((low + (high - low) * ((half - seen) / Double(count))) * 100).rounded() / 100
+        func atRank(_ rank: Int) -> Double {
+            var seen = 0
+            for (bucket, count) in buckets {
+                if seen + count >= rank {
+                    let low = bucket <= 0 ? 0 : 0.05 * pow(1.05, Double(bucket - 1))
+                    let high = 0.05 * pow(1.05, Double(max(bucket, 0)))
+                    return low + (high - low) * ((Double(rank - seen) - 0.5) / Double(count))
+                }
+                seen += count
             }
-            seen += Double(count)
+            return 0
         }
-        return nil
+        return ((atRank((total + 1) / 2) + atRank((total + 2) / 2)) / 2 * 100).rounded() / 100
     }
 }
 

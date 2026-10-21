@@ -22,6 +22,8 @@ export interface PerfModelStat {
   g?: number;
   tn?: number;
   th?: Record<string, number>;
+  /** Number of samples whose duration includes first-token wait. */
+  en?: number;
 }
 
 export interface PerfStat extends PerfModelStat {

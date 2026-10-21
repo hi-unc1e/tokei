@@ -248,7 +248,7 @@ struct PanelView: View {
             } else if let u = store.usage {
                 let cards = toolCards(for: u)
                 SegmentedTabs(sel: $sel)
-                toolCardsLayout(cards.filter { $0.visible && $0.active })
+                toolCardsLayout(cards.filter { $0.visible && $0.active }, usage: u)
                 inactiveToolsLine(cards)
             } else {
                 HStack(spacing: 8) {
@@ -575,31 +575,20 @@ struct PanelView: View {
     }
 
     @ViewBuilder
-    private func toolCardsLayout(_ cards: [ToolCardItem]) -> some View {
-        let compactCards = cards.filter { $0.presentation == .compactStatus }
-        let standardCards = cards.filter { $0.presentation == .standard }
+    private func toolCardsLayout(_ cards: [ToolCardItem], usage: Usage) -> some View {
+        let ordered = UsageCardOrdering.sorted(cards) {
+            UsageCardOrdering.tokens(for: $0.id, usage: usage, range: sel)
+        }
         if useWide {
-            VStack(spacing: 13) {
-                if !compactCards.isEmpty {
-                    EqualHeightGrid(columns: compactCards.count == 1 ? 1 : 2) {
-                        ForEach(compactCards) { item in
-                            Card(tint: item.tint) { item.content }
-                                .id(cardContentIdentity(for: item))
-                        }
-                    }
-                }
-                if !standardCards.isEmpty {
-                    EqualHeightGrid() {
-                        ForEach(standardCards) { item in
-                            Card(tint: item.tint) { item.content }
-                                .id(cardContentIdentity(for: item))
-                        }
-                    }
+            EqualHeightGrid(columns: ordered.count == 1 ? 1 : 2) {
+                ForEach(ordered) { item in
+                    Card(tint: item.tint) { item.content }
+                        .id(cardContentIdentity(for: item))
                 }
             }
         } else {
             VStack(spacing: 13) {
-                ForEach(compactCards + standardCards) { item in
+                ForEach(ordered) { item in
                     Card(tint: item.tint) { item.content }
                         .id(cardContentIdentity(for: item))
                 }
@@ -1959,8 +1948,12 @@ struct PanelView: View {
     /// 拿不到首字时间的请求速度含等待（端到端）；TTFT 有长尾，取中位数。
     func perfMetrics(_ perf: PerfStat?, includeTTFT: Bool = true) -> [Metric] {
         guard let perf, perf.n > 0 else { return [] }
-        var items: [Metric] = [.init("gauge.medium", L("平均输出速度"), Fmt.tps(perf.tps),
-                                     help: L("输出 token 总数 ÷ 生成总时长，来自 %@ 个请求；拿不到首字时间的请求按整个请求的耗时算", perf.n))]
+        let includesWait = (perf.en ?? 0) > 0
+        let speedLabel = includesWait ? L("平均输出速度（含等待）") : L("平均输出速度")
+        var items: [Metric] = [.init("gauge.medium", speedLabel, Fmt.tps(perf.tps),
+                                     help: includesWait
+                                       ? L("输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度", perf.n, perf.en ?? 0)
+                                       : L("输出 token 总数 ÷ 生成总时长，来自 %@ 个请求；拿不到首字时间的请求按整个请求的耗时算", perf.n))]
         if includeTTFT, let ttft = perf.ttft {
             items.append(.init("timer", L("TTFT 中位数"), Fmt.seconds(ttft),
                                help: L("首字延迟：从发出请求到收到第一个 token 的时间，%@ 个请求的中位数", perf.tn ?? perf.n)))
@@ -2092,6 +2085,18 @@ struct PanelView: View {
             icon = i; label = l; value = v; self.help = help
         } }
 
+    private enum MetricGridCell: Identifiable {
+        case metric(Metric)
+        case cacheHit(Double)
+
+        var id: String {
+            switch self {
+            case .metric(let metric): return "metric:\(metric.icon):\(metric.label)"
+            case .cacheHit: return "cache-hit"
+            }
+        }
+    }
+
     // 模型明细行(Claude / Gemini 共用)。
     struct ModelRow: Identifiable {
         var name: String
@@ -2170,21 +2175,21 @@ struct PanelView: View {
 
     @ViewBuilder
     func metricGrid(_ top: [Metric], hit: Double = 0, extra: [Metric] = [], tint: Color) -> some View {
+        // LazyVGrid 的所有单元格共用一个列表，标识不随插入、删除或数值更新变化。
+        let cells = top.map(MetricGridCell.metric)
+            + (hit > 0 ? [.cacheHit(hit)] : [])
+            + extra.map(MetricGridCell.metric)
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 10),
                             GridItem(.flexible(), spacing: 10)],
                   alignment: .leading, spacing: 9) {
-            ForEach(top.indices, id: \.self) { i in
-                MetricCell(icon: top[i].icon, label: top[i].label,
-                           value: top[i].value, tint: tint, help: top[i].help)
-            }
-            if hit > 0 {
-                RingMetricCell(value: hit, label: "Cache Hit", tint: tint)
-            }
-            let offset = top.count + (hit > 0 ? 1 : 0)
-            ForEach(extra.indices, id: \.self) { i in
-                MetricCell(icon: extra[i].icon, label: extra[i].label,
-                           value: extra[i].value, tint: tint, help: extra[i].help)
-                    .id(offset + i)
+            ForEach(cells) { cell in
+                switch cell {
+                case .metric(let metric):
+                    MetricCell(icon: metric.icon, label: metric.label,
+                               value: metric.value, tint: tint, help: metric.help)
+                case .cacheHit(let value):
+                    RingMetricCell(value: value, label: "Cache Hit", tint: tint)
+                }
             }
         }
     }
@@ -2432,7 +2437,7 @@ struct PanelView: View {
                 }
                 if let perf {
                     HStack(spacing: 2) {
-                        Text(L("平均速度")).font(labelFont).foregroundStyle(Theme.tSecondary)
+                        Text((perf.en ?? 0) > 0 ? L("平均速度（含等待）") : L("平均速度")).font(labelFont).foregroundStyle(Theme.tSecondary)
                         Text(Fmt.tps(perf.tps)).font(tagFont).foregroundStyle(tint)
                         if let ttft = perf.ttft {
                             Text("·").font(tagFont).foregroundStyle(tint.opacity(0.6))
@@ -2443,9 +2448,11 @@ struct PanelView: View {
                     .padding(.horizontal, 6).padding(.vertical, 2.5)
                     .background(Capsule().fill(bg))
                     .overlay(Capsule().strokeBorder(border, lineWidth: 0.5))
-                    .help(perf.ttft == nil
-                          ? L("平均输出速度来自 %@ 个请求", perf.n)
-                          : L("平均输出速度来自 %@ 个请求，TTFT 中位数来自其中 %@ 个", perf.n, perf.tn ?? perf.n))
+                    .help((perf.en ?? 0) > 0
+                          ? L("输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度", perf.n, perf.en ?? 0)
+                          : perf.ttft == nil
+                            ? L("平均输出速度来自 %@ 个请求", perf.n)
+                            : L("平均输出速度来自 %@ 个请求，TTFT 中位数来自其中 %@ 个", perf.n, perf.tn ?? perf.n))
                 }
                 if hit > 0 {
                     HStack(spacing: 2) {

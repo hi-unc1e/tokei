@@ -14,6 +14,8 @@ Windows 版（windows/src，Tauri + React）直接读同一份词表：它的 `L
 4. 词表里没有已经不用的旧词条。
 法、日、韩允许缺词，缺了界面回退英文。
 """
+import sys
+import ast
 import io
 import re
 import subprocess
@@ -204,9 +206,10 @@ def _string_tokens(source):
     return out
 
 
-def collector_keys():
-    """采集器输出、会进 App 界面的中文。"""
-    source = (ROOT / "usage.30s.py").read_text(encoding="utf-8")
+def collector_keys(source=None):
+    """采集器输出、会进 App 界面的中文。source 供跨版本一致性测试注入。"""
+    if source is None:
+        source = (ROOT / "usage.30s.py").read_text(encoding="utf-8")
     keys = {}
     previous = None
     for token in _string_tokens(source):
@@ -220,6 +223,26 @@ def collector_keys():
                     keys.setdefault(key, set()).add(f"usage.30s.py:{token.start[0]}")
         if token.type not in (tokenize.COMMENT, tokenize.NL):
             previous = token
+    # AST 的列号以 UTF-8 字节计；提前拆行，避免为每个 f-string 重扫整份采集器。
+    source_lines = source.encode("utf-8").splitlines(keepends=True)
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.JoinedStr):
+            continue
+        if node.lineno == node.end_lineno:
+            raw = source_lines[node.lineno - 1][node.col_offset:node.end_col_offset]
+        else:
+            raw = (source_lines[node.lineno - 1][node.col_offset:]
+                   + b"".join(source_lines[node.lineno:node.end_lineno - 1])
+                   + source_lines[node.end_lineno - 1][:node.end_col_offset])
+        raw = raw.decode("utf-8")
+        has_args = any(isinstance(part, ast.FormattedValue) for part in node.values)
+        key = "".join(
+            (part.value.replace("%", "%%") if has_args else part.value)
+            if isinstance(part, ast.Constant) else "%@"
+            for part in node.values
+        )
+        if CJK.search(key) and not COLLECTOR_IGNORE.search(raw) and not COLLECTOR_IGNORE.search(key):
+            keys.setdefault(key, set()).add(f"usage.30s.py:{node.lineno}")
     return keys
 
 
@@ -263,6 +286,19 @@ def all_keys():
 
 
 class LocalizationTests(unittest.TestCase):
+    def test_collector_f_strings_keep_keys_across_python_versions(self):
+        source = '''
+"""说明文字不进界面。"""
+label = f"单日 {count} 亿 token"
+share = f"周末占 {ratio:.1f}%"
+escaped = f"保留 {{符号}} {count} 个"
+ignored = f"更新失败 {reason}"
+plain = "普通标签"
+'''
+        self.assertEqual(set(collector_keys(source)), {
+            "单日 %@ 亿 token", "周末占 %@%%", "保留 {符号} %@ 个", "普通标签",
+        })
+
     def test_every_interface_string_has_an_english_translation(self):
         english = load_strings("en")
         missing = sorted(all_keys() - set(english))
@@ -296,6 +332,7 @@ class LocalizationTests(unittest.TestCase):
             for m in re.finditer(r'\bL\("((?:[^"\\]|\\.)*)"\)', src):
                 self.assertNotIn("%@", m.group(1), f"{path.name}: {m.group(0)}")
 
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_the_swift_lookup_behaves(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "l10n-check"

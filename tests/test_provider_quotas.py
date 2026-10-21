@@ -700,7 +700,8 @@ class ProviderQuotaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.isolate_cache(Path(tmp))
             with mock.patch.object(
-                    USAGE.subprocess, "run", return_value=mock.Mock(stdout="")) as run:
+                    USAGE.subprocess, "run",
+                    return_value=mock.Mock(stdout=b"" if USAGE._IS_WINDOWS else "")) as run:
                 self.assertEqual(USAGE._antigravity_running_processes(now_epoch=1000), [])
                 self.assertEqual(run.call_count, 1)
 
@@ -715,14 +716,17 @@ class ProviderQuotaTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 3)
 
     def test_antigravity_scan_cache_never_hides_a_running_process(self):
-        output = ("321 /Applications/Antigravity.app/Contents/Resources/language_server_macos_arm "
+        executable = (r"C:\Apps\Antigravity\language_server_windows_x64.exe" if USAGE._IS_WINDOWS
+                      else "/Applications/Antigravity.app/Contents/Resources/language_server_macos_arm")
+        output = (f"321 {executable} "
                   "--csrf_token language-token --app_data_dir antigravity")
         with tempfile.TemporaryDirectory() as tmp:
             self.isolate_cache(Path(tmp))
             Path(USAGE.ANTIGRAVITY_SCAN_CACHE).write_text(
                 json.dumps({"empty_at": 900}), encoding="utf-8")
             with mock.patch.object(
-                    USAGE.subprocess, "run", return_value=mock.Mock(stdout=output)) as run:
+                    USAGE.subprocess, "run", return_value=mock.Mock(
+                        stdout=output.encode("utf-8") if USAGE._IS_WINDOWS else output)) as run:
                 processes = USAGE._antigravity_running_processes(now_epoch=2000)
                 self.assertEqual([item["pid"] for item in processes], [321])
                 self.assertFalse(Path(USAGE.ANTIGRAVITY_SCAN_CACHE).exists())
@@ -757,7 +761,8 @@ class ProviderQuotaTests(unittest.TestCase):
 
             cache_text = Path(USAGE.PROVIDER_QUOTA_CACHE).read_text(encoding="utf-8")
             self.assertNotIn("secret-a", cache_text)
-            self.assertEqual(Path(USAGE.PROVIDER_QUOTA_CACHE).stat().st_mode & 0o777, 0o600)
+            if not USAGE._IS_WINDOWS:
+                self.assertEqual(Path(USAGE.PROVIDER_QUOTA_CACHE).stat().st_mode & 0o777, 0o600)
             self.assertEqual(
                 USAGE._cached_provider_quota(
                     "sub2api", marker, max_age=60, now_epoch=1_800_000_030

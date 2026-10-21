@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -149,6 +150,7 @@ class GrokBotTests(unittest.TestCase):
         fetch_native.assert_called_once_with()
         fetch_cursor.assert_not_called()
 
+    @unittest.skipUnless(sys.platform == "darwin", "Uses the macOS Grok Bot helper and authorization")
     def test_native_grok_bot_login_is_preferred_and_cached(self):
         reset = datetime.now().astimezone() + timedelta(days=7)
         payload = {
@@ -186,6 +188,7 @@ class GrokBotTests(unittest.TestCase):
 
         self.assertEqual(parsed, account_id)
 
+    @unittest.skipUnless(sys.platform == "darwin", "Uses the macOS Grok Bot helper and authorization")
     def test_native_auth_failure_is_backed_off_for_five_minutes(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(USAGE, "PROVIDER_QUOTA_CACHE", str(Path(tmp) / "quota.json")), \
@@ -198,6 +201,7 @@ class GrokBotTests(unittest.TestCase):
 
         helper.assert_called_once_with()
 
+    @unittest.skipUnless(sys.platform == "darwin", "Uses the macOS Grok Bot helper and authorization")
     def test_recent_usage_cache_survives_missing_authorization_marker(self):
         now = datetime.now().astimezone().replace(microsecond=0)
         cached = USAGE._grok_bot_provider_data({
@@ -227,6 +231,7 @@ class GrokBotTests(unittest.TestCase):
         self.assertEqual(quota["source"], "cache")
         self.assertEqual(quota["usage"]["ranges"]["today"]["tokens"], 120)
 
+    @unittest.skipUnless(sys.platform == "darwin", "Uses the macOS Grok Bot helper and authorization")
     def test_historical_usage_has_no_quota_expiry(self):
         now = datetime.now().astimezone().replace(microsecond=0)
         cached = USAGE._grok_bot_provider_data({
@@ -260,6 +265,7 @@ class GrokBotTests(unittest.TestCase):
         self.assertTrue(quota["stale"])
         self.assertEqual(quota["usage"]["ranges"]["today"]["tokens"], 120)
 
+    @unittest.skipUnless(sys.platform == "darwin", "Uses the macOS Grok Bot helper and authorization")
     def test_missing_authorization_marker_is_repaired_without_user_prompt(self):
         payload = {
             "quotaFetched": True,
@@ -284,6 +290,7 @@ class GrokBotTests(unittest.TestCase):
         repair.assert_called_once_with()
         cursor_session.assert_not_called()
 
+    @unittest.skipUnless(sys.platform == "darwin", "Uses the macOS Grok Bot helper and authorization")
     def test_missing_marker_repair_failure_is_backed_off_for_five_minutes(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(USAGE, "PROVIDER_QUOTA_CACHE", str(Path(tmp) / "quota.json")), \
@@ -297,6 +304,7 @@ class GrokBotTests(unittest.TestCase):
 
         repair.assert_called_once_with()
 
+    @unittest.skipUnless(sys.platform == "darwin", "Uses the macOS Grok Bot helper and authorization")
     def test_confirmed_empty_native_quota_does_not_fall_back_to_cursor(self):
         payload = {"hasNonZeroIncludedLimit": False, "usagePercent": 0}
         with tempfile.TemporaryDirectory() as tmp, \
@@ -311,6 +319,7 @@ class GrokBotTests(unittest.TestCase):
         helper.assert_called_once_with()
         cursor_session.assert_not_called()
 
+    @unittest.skipUnless(sys.platform == "darwin", "Uses the macOS Grok Bot helper and authorization")
     def test_quota_failure_uses_one_hour_stale_cache(self):
         session = {"marker": "cursor-marker"}
         marker = USAGE._provider_credential_marker("cursor-usage-v1", session["marker"])
@@ -339,6 +348,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
+@unittest.skipUnless(sys.platform == "darwin", "Grok Bot subprocess helper is macOS-only")
 class GrokBotBackgroundHelperTests(unittest.TestCase):
     """辅助程序拉全年用量可能要一分多钟：放到后台跑，不拖住刷新、也不因超时丢结果。"""
 
@@ -411,6 +421,11 @@ class GrokBotIncrementalEventsTests(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
         self.today = datetime.now().astimezone().date()
+        self.identity = ("fixture-account", "fixture-profile") if USAGE._IS_WINDOWS else None
+        authorization = mock.patch.object(USAGE, "_grok_bot_authorized_identity",
+                                          return_value=self.identity)
+        authorization.start()
+        self.addCleanup(authorization.stop)
 
     def ms(self, day, hour=12):
         return int(datetime(day.year, day.month, day.day, hour).timestamp() * 1000)
@@ -424,25 +439,30 @@ class GrokBotIncrementalEventsTests(unittest.TestCase):
                 "usageStartDate": str(self.ms(start_day, 0)), "usageEventsDisplay": events,
                 "sandUsage": {"hasNonZeroIncludedLimit": True, "usagePercent": 10}}
 
+    def merge(self, payload):
+        if self.identity:
+            payload = dict(payload, _tokei_account=self.identity[0], _tokei_profile=self.identity[1])
+        return USAGE._grok_bot_merge_events(payload, expected_identity=self.identity)
+
     def test_a_full_fetch_then_a_two_day_fetch_keep_the_whole_year(self):
         jan1 = self.today.replace(month=1, day=1)
         days = sorted({jan1, self.today - timedelta(days=2) if self.today.toordinal() - 2 >= jan1.toordinal() else jan1,
                        self.today})
-        full = USAGE._grok_bot_merge_events(self.payload(jan1, [self.event(day, 100) for day in days]))
+        full = self.merge(self.payload(jan1, [self.event(day, 100) for day in days]))
         self.assertEqual(len(full["usageEventsDisplay"]), len(days))
 
         since = USAGE._grok_bot_events_since()
         self.assertEqual(since, self.ms(max(self.today - timedelta(days=1), jan1), 0),
                          "从最后一天的前一天零点起补拉")
-        fresh = USAGE._grok_bot_merge_events(self.payload(
+        fresh = self.merge(self.payload(
             max(self.today - timedelta(days=1), jan1),
             [self.event(self.today, 100), self.event(self.today, 50, hour=13)]))
         tokens = sum(e["tokenUsage"]["inputTokens"] for e in fresh["usageEventsDisplay"])
         self.assertEqual(tokens, 100 * (len(days) - 1) + 150, "窗口里的今天整天替换，更早的留着")
 
     def test_quota_only_payload_still_shows_stored_usage(self):
-        USAGE._grok_bot_merge_events(self.payload(self.today, [self.event(self.today, 70)]))
-        merged = USAGE._grok_bot_merge_events({"quotaFetched": True, "usageFetched": False})
+        self.merge(self.payload(self.today, [self.event(self.today, 70)]))
+        merged = self.merge({"quotaFetched": True, "usageFetched": False})
         self.assertEqual(merged["usageEventsDisplay"][0]["tokenUsage"]["inputTokens"], 70,
                          "这次没拉到用量时用存档")
 
@@ -451,11 +471,12 @@ class GrokBotIncrementalEventsTests(unittest.TestCase):
         directory.mkdir(parents=True)
         old = directory / f"{self.today.year - 1}-12-31.json"
         old.write_text("[]", encoding="utf-8")
-        USAGE._grok_bot_merge_events(self.payload(self.today, [self.event(self.today, 1)]))
+        self.merge(self.payload(self.today, [self.event(self.today, 1)]))
         self.assertFalse(old.exists())
 
+    @unittest.skipUnless(sys.platform == "darwin", "Uses the macOS Grok Bot helper and authorization")
     def test_the_helper_is_asked_only_for_recent_days(self):
-        USAGE._grok_bot_merge_events(self.payload(self.today, [self.event(self.today, 1)]))
+        self.merge(self.payload(self.today, [self.event(self.today, 1)]))
         args_file = Path(self.tmp.name) / "args"
         script = Path(self.tmp.name) / "helper.sh"
         script.write_text(f"#!/bin/sh\necho \"$@\" > '{args_file}'\nexit 2\n", encoding="utf-8")

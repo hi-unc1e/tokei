@@ -1,3 +1,4 @@
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProviderQuotaModelTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_swift_model_decodes_provider_quota(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "provider-quota-model-check"
@@ -30,6 +32,7 @@ class ProviderQuotaModelTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("provider quota model checks passed", result.stdout)
 
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_fmt_local_time_and_remaining(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "fmt-time-check"
@@ -69,6 +72,7 @@ class ProviderQuotaModelTests(unittest.TestCase):
         self.assertIn("active: cursorUsage.totalTokens > 0 || cursorUsage.requests > 0", cursor_card)
         self.assertNotIn("u.cursor.available", cursor_card)
 
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_sync_manager_provider_config_typechecks(self):
         result = subprocess.run(
             [

@@ -284,6 +284,9 @@ private enum UpdaterSecurityCheck {
     }
 
     private static func run(_ executable: String, _ arguments: [String]) throws -> Int32 {
+        let step = URL(fileURLWithPath: executable).lastPathComponent + " " + (arguments.first ?? "")
+        let started = Date()
+        FileHandle.standardError.write(Data("[updater integration] start \(step)\n".utf8))
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -291,6 +294,10 @@ private enum UpdaterSecurityCheck {
         process.standardError = FileHandle.nullDevice
         try process.run()
         process.waitUntilExit()
+        let seconds = String(format: "%.2f", Date().timeIntervalSince(started))
+        FileHandle.standardError.write(Data(
+            "[updater integration] finished \(step): status \(process.terminationStatus), \(seconds)s\n".utf8
+        ))
         return process.terminationStatus
     }
 

@@ -1,3 +1,4 @@
+import sys
 import re
 import subprocess
 import tempfile
@@ -10,6 +11,7 @@ SRC = ROOT / "Tokei" / "Sources" / "Tokei"
 
 
 class UsageEmptyStateTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_swift_empty_state_checks(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "usage-empty-state-check"

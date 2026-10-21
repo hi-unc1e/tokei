@@ -1,3 +1,4 @@
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DevinUsageModelTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_devin_stat_decodes_tokens_and_quota_independently(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "devin-usage-model-check"

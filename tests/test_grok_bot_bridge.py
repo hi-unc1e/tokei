@@ -1,3 +1,4 @@
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -9,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class GrokBotQuotaBridgeTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_electron_safe_storage_fixture(self):
         swiftc = shutil.which("swiftc")
         if swiftc is None:

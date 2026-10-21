@@ -1,3 +1,4 @@
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class QoderUsageModelTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_qoder_harness_models_keep_exact_usage_separate(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "qoder-usage-model-check"
