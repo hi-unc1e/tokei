@@ -69,19 +69,33 @@ jobs:
           if ! git merge upstream/main \
               -m "sync: merge upstream cclank/tokei@${UPSTREAM_SHA} (conflicts resolved in favor of ours)" \
               -X ours; then
-            git merge --abort 2>/dev/null || true
-            {
-              echo '## 上游合并失败（-X ours 无法自动解决的冲突）'
-              echo
-              echo "上游提交: ${UPSTREAM_SHA}"
-              echo "请在本地执行："
-              echo '```bash'
-              echo 'git fetch https://github.com/cclank/tokei.git main:upstream-main'
-              echo 'git merge upstream-main -X ours   # 冲突以本地为主，逐个确认'
-              echo 'git push'
-              echo '```'
-            } > /tmp/sync-failure.md
-            exit 1
+            # -X ours 裁决不了 modify/delete 冲突（上游改动了本地已删除的文件等）。
+            # 按既定策略自动裁决：本地删除的文件保持删除，其余未合并路径一律取本地版本。
+            # 黑名单/编译/测试闸门在后续步骤兜底，裁决错了也进不了远端。
+            UNMERGED="$(git diff --name-only --diff-filter=U || true)"
+            if [ -z "$UNMERGED" ]; then
+              git merge --abort 2>/dev/null || true
+              {
+                echo '## 上游合并失败（合并直接出错，无未合并路径可裁决）'
+                echo
+                echo "上游提交: ${UPSTREAM_SHA}"
+              } > /tmp/sync-failure.md
+              exit 1
+            fi
+            echo "自动裁决 modify/delete 冲突（保持本地策略）:"
+            echo "$UNMERGED"
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              if git status --porcelain -- "$f" | grep -q '^DU'; then
+                git rm -q -- "$f"                                   # 本地已删、上游改过 → 保持删除
+              else
+                git checkout -q --ours -- "$f" 2>/dev/null || true  # 其余冲突 → 以本地为准
+                git add -q -- "$f" 2>/dev/null || true
+              fi
+            done <<< "$UNMERGED"
+            git commit -q --no-edit \
+              -m "sync: merge upstream cclank/tokei@${UPSTREAM_SHA} (conflicts resolved in favor of ours)"
+            echo "冲突已按本地策略裁决并提交。"
           fi
 
       - name: Verify merge (telemetry blacklist)
