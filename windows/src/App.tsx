@@ -346,7 +346,6 @@ export default function App({ collectorReady }: { collectorReady: Promise<void> 
     void collectorReady.then(() => {
       if (disposed) return;
       setReady(true);
-      if (inTauri && !isQuickSurface) void call("start_activity_reporter", { enabled: getPref("shareBasicActivity", true) }).catch(() => {});
     }).catch((err) => {
       if (!disposed) setReady(true); // Keep settings/diagnostics reachable when configuration fails.
       console.error(err);

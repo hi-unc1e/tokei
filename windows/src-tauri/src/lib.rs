@@ -108,7 +108,6 @@ fn set_tray_menu_labels(
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
-    app.state::<privacy::ActivityState>().stop();
     app.exit(0);
 }
 
@@ -137,7 +136,6 @@ pub fn run() {
         .manage(Mutex::new(power::KeepAwake::default()))
         .manage(panel::SurfaceState::load())
         .manage(snapshot::SnapshotStore::default())
-        .manage(privacy::ActivityState::default())
         .manage(StartupWindow {
             manual: !std::env::args().any(|arg| arg == "--autostart"),
             shown: AtomicBool::new(false),
@@ -161,8 +159,6 @@ pub fn run() {
             quit_app,
             set_keep_awake,
             keep_awake_active,
-            privacy::start_activity_reporter,
-            privacy::set_activity_statistics,
             privacy::grok_bot_authorization_status,
             privacy::authorize_grok_bot,
             panel::open_main_window,
