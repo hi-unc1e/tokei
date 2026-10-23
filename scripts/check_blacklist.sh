@@ -25,7 +25,7 @@ STAGED=0
 [ "${1:-}" = "--staged" ] && STAGED=1
 
 # 只扫描源代码与配置，跳过文档中的历史性提及（README 里的官网/致谢链接属信息引用，不构成代码回归）
-SCAN_PATHS='Tokei/Sources tests usage.30s.py scripts .github install.sh release.sh'
+SCAN_PATHS='windows/src windows/src-tauri windows/native_bridge.py Tokei/Sources tests usage.30s.py scripts .github install.sh release.sh'
 
 fail=0
 for entry in "${BLACKLIST[@]}"; do

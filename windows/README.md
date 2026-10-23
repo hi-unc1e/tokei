@@ -15,7 +15,7 @@ Tokei 的 Windows 版：桌面窗口 + 系统托盘，用 [Tauri 2](https://taur
 - Provider 的 API Key 存在 Windows「凭据管理器」，采集时以环境变量交给脚本，不写进 `~/.tokei/config.json`。
 - 防休眠（`SetThreadExecutionState`）。
 - 主窗口统一采集并记录历史，快捷面板订阅带版本号的用量状态；两套窗口共用语言、字号和显示卡片偏好。
-- 隐私与额度：应用活跃统计默认开启，每次启动仅尝试上报一次，可关闭并终止在途请求；Claude Code CLI 额度查询默认关闭，优先使用 Desktop 缓存，CLI 结果缓存 5 分钟。
+- 隐私与额度：本 fork 不包含应用活跃统计上报；Claude Code CLI 额度查询默认关闭，优先使用 Desktop 缓存，CLI 结果缓存 5 分钟。
 - Grok Bot 授权：先开启额度查询，再点「授权 Grok Bot」，读取 Grok Bot 自身登录态；授权绑定当前账号，重启和升级后保留，切换账号后需重新授权。Token 不写入 Tokei 文件或传给页面。
 
 ## 与 Mac 版的差异
@@ -50,7 +50,7 @@ Windows 安装包须等待三个平台的全量测试通过，并额外执行 Ru
 
 ## 结构
 
-- `native_bridge.py`：Windows 凭据解密、Grok Bot 授权与官方查询、Claude CLI 查询缓存、应用活跃统计。随安装包放在 `collector/windows_native.py`，使用内嵌 Python 和 cryptography。
+- `native_bridge.py`：Windows 凭据解密、Grok Bot 授权与官方查询、Claude CLI 查询缓存。随安装包放在 `collector/windows_native.py`，使用内嵌 Python 和 cryptography。
 - `src-tauri/src/`：双窗口与托盘（`panel.rs`）、工作区定位（`placement.rs`）、共享用量状态（`snapshot.rs`）、隐私进程控制（`privacy.rs`）、采集脚本（`collector.rs`）、防休眠（`power.rs`）、
   `~/.tokei` 文件与凭据管理器（`store.rs`）。
 - `src/cards/`：各工具卡片，顺序见 `registry.ts`，与 Mac 版 `PanelView.toolCards` 一致。
@@ -63,7 +63,7 @@ Windows 安装包须等待三个平台的全量测试通过，并额外执行 Ru
 原生窗口的本机测试可使用 debug 构建的 `TOKEI_TEST_STATE_DIR` 指向独立绝对路径，并用 `TOKEI_SCRIPT` 指向固定采集样本；release 构建始终使用正常用户目录。托盘点击偏好保存在 `~/.tokei/windows-ui.json`。
 ### 启动加载
 
-界面先显示导航和加载状态，配置同步完成后才开始采集和处理活跃统计开关。首次启动先用 `--local-only` 读取本地用量，再进行完整额度刷新；快捷面板首次打开时创建，并订阅主窗口的数据。
+界面先显示导航和加载状态，配置同步完成后才开始采集。首次启动先用 `--local-only` 读取本地用量，再进行完整额度刷新；快捷面板首次打开时创建，并订阅主窗口的数据。
 
 再次启动会先显示当天的用量预览，并标注原采集时间。预览文件 `~/.tokei/windows-usage-preview.json` 只保留用量区间，不保存账号、登录凭据或旧额度；损坏、过期和跨日的预览会被忽略。预览不写入额度历史。
 

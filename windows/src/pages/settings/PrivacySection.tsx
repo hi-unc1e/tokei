@@ -49,10 +49,9 @@ export function PrivacySection() {
     setSaving(key);
     setError("");
     try {
-      if (key === "shareBasicActivity") await call("set_activity_statistics", { enabled: next });
-      else await updateTokeiConfig({ [PRIVACY_CONFIG_KEYS[key]]: next });
+      await updateTokeiConfig({ [PRIVACY_CONFIG_KEYS[key]]: next });
       setPref(key, next);
-      if (key !== "shareBasicActivity") refresh();
+      refresh();
     } catch (err) {
       if (alive.current) setError(String(err));
     } finally {
@@ -80,13 +79,10 @@ export function PrivacySection() {
     }
   };
 
-  const row = (title: string, key: string) => <ToggleRow title={title} on={getPref(key, key === "shareBasicActivity")}
+  const row = (title: string, key: string) => <ToggleRow title={title} on={getPref(key, false)}
     disabled={saving !== null || key === "grokBotQuotaEnabled" && authorizing} onChange={(next) => void change(key, next)} />;
   return (
     <SettingsSection icon="lock.shield" title={L("隐私与额度")}>
-      {row(L("应用活跃统计"), "shareBasicActivity")}
-      <Note>{L("用于了解应用的活跃安装数量，默认开启，可随时关闭。每次启动仅尝试上报一次随机安装 ID、Tokei 版本及系统名称和主次版本。服务端记录首次和最近活跃时间，并保存最近一次来源 IP。不会上传账号、项目、对话、Token、费用或额度。关闭后停止发送，重新开启于下次启动生效；安装 ID 不参与多设备同步。")}</Note>
-      <ThinDivider />
       {row(L("Claude Code CLI 额度查询"), "claudeCLIQuotaEnabled")}
       <Note>{L("默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。")}</Note>
       <ThinDivider />

@@ -1,7 +1,7 @@
 """Windows native integrations. Credentials never leave this process.
 
-The collector imports quota functions; Tauri runs authorization and launch
-reporting as short-lived processes using its bundled Python runtime.
+The collector imports quota functions; Tauri runs authorization as short-lived
+processes using its bundled Python runtime.
 """
 import argparse
 import base64
@@ -11,14 +11,13 @@ import json
 import math
 import os
 from pathlib import Path
-import platform
 import re
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from email.utils import parsedate_to_datetime
 
 MAX_FILE = 2 * 1024 * 1024
@@ -26,7 +25,6 @@ MAX_USAGE = 16 * 1024 * 1024
 CLAUDE_URL = "https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1"
 GROK_QUOTA_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetSandUsageStatus"
 GROK_USAGE_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents"
-ACTIVITY_URL = "https://tokei-ops.lanshuagent.com/v1/heartbeat"
 WINDOWS = sys.platform == "win32"
 
 
@@ -465,50 +463,12 @@ def fetch_grok_data(since=None, requester=request_json):
     return output if output["quotaFetched"] or output["usageFetched"] else None
 
 
-def activity_payload(installation, version, os_version):
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", version):
-        raise BridgeError("unavailable")
-    parsed = uuid.UUID(installation)
-    if parsed.version != 4 or not re.fullmatch(r"\d+\.\d+", os_version):
-        raise BridgeError("unavailable")
-    return {"installation_id": str(parsed), "app_version": version, "os_name": "Windows", "os_version": os_version}
-
-
-def report_activity(directory, version, sender=None):
-    """One attempt per launched helper, no retry or upload queue."""
-    path = Path(directory) / "state.json"
-    try:
-        state = read_json(path) if path.exists() else {"installation_id": str(uuid.uuid4())}
-        os_parts = platform.version().split(".")
-        os_version = ".".join(os_parts[:2])
-        payload = activity_payload(state["installation_id"], version, os_version)
-        state["last_attempt_at"] = int(time.time())
-        atomic_json(path, state)
-        if sender is None:
-            def sender(value):
-                req = urllib.request.Request(ACTIVITY_URL, data=json.dumps(value).encode(),
-                    headers={"Content-Type": "application/json", "User-Agent": "Tokei/" + version})
-                with urllib.request.build_opener(NoRedirect()).open(req, timeout=10) as response:
-                    return response.status == 204 and response.geturl() == ACTIVITY_URL
-        if sender(payload):
-            state["last_successful_day"] = datetime.now(timezone.utc).date().isoformat()
-            atomic_json(path, state)
-    except Exception:
-        pass  # Never print installation IDs or interrupt the application.
-
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["grok-status", "grok-authorize", "grok-data", "activity"])
+    parser.add_argument("mode", choices=["grok-status", "grok-authorize", "grok-data"])
     parser.add_argument("--since", type=int)
     parser.add_argument("--result")
-    parser.add_argument("--directory")
-    parser.add_argument("--version")
     args = parser.parse_args()
-    if args.mode == "activity":
-        if WINDOWS and args.directory and args.version:
-            report_activity(args.directory, args.version)
-        return
     if args.mode == "grok-status":
         print(json.dumps(grok_status()))
     elif args.mode == "grok-authorize":
