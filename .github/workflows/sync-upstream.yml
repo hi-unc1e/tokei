@@ -1,20 +1,22 @@
 name: Sync upstream
 
-# 每周自动把上游 cclank/tokei 的 main 合并进本仓库 main（北京时间周一凌晨 03:30）。
+# 每天凌晨自动把上游 cclank/tokei 的 main 合并进本仓库 main（北京时间 03:30）。
+# 合并完全在 GitHub 云端进行，本地不做 merge/rebase/push。
 #
 # 合并策略（兼顾“跟进上游”与“本地优化优先”）：
 #   git merge upstream/main -X ours
 #   - 上游改动中与本地不冲突的部分全部采纳（新功能、修复照常进来）；
 #   - 一旦同一处发生冲突，自动以本地版本为准（-X ours），本地优化不会被覆盖；
-#   - 不改写历史（不用 rebase 重放本地提交），远端 main 始终快进，本地各机器
-#     只需 git pull 即可。
+#   - modify/delete 冲突（上游改动本地已删除的文件，如遥测测试）自动裁决：
+#     本地删除的保持删除，其余以本地版本为准；
+#   - 不改写历史，远端 main 始终快进。
 #
 # 安全闸门：合并后必须通过遥测黑名单检查 + swift build + Python 测试套件
 # 才会推送；任一失败都不推送，并自动开 Issue 提醒人工处理。
 on:
   schedule:
-    # GitHub Actions 用 UTC；周日 19:30 UTC = 北京时间周一 03:30
-    - cron: '30 19 * * 0'
+    # GitHub Actions 用 UTC；19:30 UTC = 北京时间次日 03:30
+    - cron: '30 19 * * *'
   workflow_dispatch:
 
 permissions:
