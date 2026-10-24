@@ -18,9 +18,10 @@ class StartupCollectorTests(unittest.TestCase):
     def test_local_first_pass_keeps_usage_and_never_calls_quota_providers(self):
         with tempfile.TemporaryDirectory(prefix="tokei-startup-") as tmp:
             home = Path(tmp)
-            now = datetime.now().astimezone()
+            # Keep fixture offsets on the same day even when the test runs just after midnight.
+            now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
             claude = home / ".claude/projects/demo/session.jsonl"
-            codex = home / ".codex/sessions/2026/10/13/rollout-demo.jsonl"
+            codex = home / ".codex/sessions" / now.strftime("%Y/%m/%d") / "rollout-demo.jsonl"
             claude.parent.mkdir(parents=True)
             codex.parent.mkdir(parents=True)
             claude.write_text("\n".join(json.dumps(r) for r in _claude_records(now)), encoding="utf-8")
@@ -175,3 +176,44 @@ function realm() {
 """
             result = subprocess.run([node, "-e", script, tmp], capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+# The packaging job runs this module after preparing its embedded runtime.
+EMBEDDED_DECODER_CHECK = r'''
+import importlib.util, pathlib, sys
+import zstandard
+root, home = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("embedded_decoder_usage", root / "usage.30s.py")
+u = importlib.util.module_from_spec(spec); sys.modules[spec.name] = u; spec.loader.exec_module(u)
+raw = b'{"fixture":"compressed usage"}\n'
+for content_size in (True, False):
+    compressor = zstandard.ZstdCompressor(write_content_size=content_size)
+    assert u._openclaw_zstd_blob(compressor.compress(raw)) == raw
+    assert u._openclaw_zstd_blob(compressor.compress(b"x" * (4 * 1024 * 1024 + 1))) is None
+if hasattr(u, "_open_codex_rollout"):
+    path = home / "fixture.jsonl.zst"
+    path.write_bytes(zstandard.ZstdCompressor().compress(raw))
+    with u._open_codex_rollout(path) as reader:
+        assert reader.readline(1024) == raw
+        assert reader.read() == b""
+print("compressed usage decoder checks passed", zstandard.__version__)
+'''
+
+
+class EmbeddedCollectorDecoderTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "The embedded Windows runtime requires Windows")
+    def test_packaged_runtime_reads_compressed_usage(self):
+        interpreter = ROOT / "windows/src-tauri/python/python.exe"
+        if not interpreter.is_file():
+            self.skipTest("The embedded runtime is prepared by the Windows packaging job")
+        with tempfile.TemporaryDirectory(prefix="tokei-embedded-codec-") as tmp:
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith(("TOKEI_", "CODEX_", "CLAUDE_", "GROK_"))}
+            env.update(HOME=tmp, USERPROFILE=tmp, APPDATA=str(Path(tmp) / "roaming"),
+                       LOCALAPPDATA=str(Path(tmp) / "local"))
+            result = subprocess.run(
+                [str(interpreter), "-c", EMBEDDED_DECODER_CHECK, str(ROOT), tmp],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("compressed usage decoder checks passed", result.stdout)

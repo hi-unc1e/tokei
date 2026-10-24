@@ -182,6 +182,7 @@ const TOOL_COLORS: Record<string, RGB> = {
   kimicode: Theme.kimicode,
   musecode: Theme.musecode,
   cmdcode: Theme.cmdcode,
+  copilot: Theme.copilot,
   devin: Theme.devin,
   minimax: Theme.minimax,
 };

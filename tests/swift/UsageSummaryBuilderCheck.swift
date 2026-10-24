@@ -112,6 +112,77 @@ struct UsageSummaryBuilderCheck {
         try expect(miniMaxLine?.sessions == 5, "minimax line sessions")
         try expect(usage.minimax.quota.available, "minimax quota decodes alongside ranges")
 
+        var copilotUsage = usage
+        var copilotRanges = TokenUsageRanges.empty
+        copilotRanges.today = TokenUsageRange(in: 100, out: 13, cr: 50, cw: 10, reason: 7, cost: 0.5, credits: 2, sessions: 1, coverage: "output_only")
+        copilotUsage.copilot = TokenUsageStat(ranges: copilotRanges)
+        let coverageLabels: [(AppLanguage, String)] = [(.en, "Output only"), (.fr, "Sortie uniquement"), (.ja, "出力のみ"), (.ko, "출력만")]
+        for (language, label) in coverageLabels {
+            L10n.forcedLanguage = language
+            let localized = UsageSummaryBuilder.line(forToolID: "copilot", usage: copilotUsage, range: .today, visibility: allVisible)
+            try expect(L("仅输出") == label && localized?.extra?.hasPrefix(label) == true, "Copilot shared output-only translation")
+        }
+        L10n.forcedLanguage = .zh
+        let copilotLine = UsageSummaryBuilder.line(
+            forToolID: "copilot", usage: copilotUsage, range: .today, visibility: allVisible
+        )
+        try expect(copilotLine?.tokens == 20, "copilot known output excludes ambiguous input/cache")
+        try expect(copilotLine?.output == 13 && copilotLine?.reason == 7, "copilot exclusive output and reasoning")
+        try expect(copilotLine?.input == nil && copilotLine?.cacheRead == nil && copilotLine?.cacheWrite == nil && copilotLine?.cost == nil, "copilot unknown cells omitted")
+        try expect(copilotLine?.extra?.contains(L("仅输出")) == true, "copilot coverage is visible in overview and share")
+        try expect(copilotLine?.extra?.contains("2 Premium Requests") == true, "copilot premium requests remain shareable")
+        var hideCopilot = allVisible
+        hideCopilot.copilot = false
+        try expect(UsageSummaryBuilder.line(
+            forToolID: "copilot", usage: copilotUsage, range: .today, visibility: hideCopilot
+        ) == nil, "hidden copilot cannot enter share overview")
+
+        // Cursor 卡片按 toolID "cursor" 取这一行。
+        var cursorUsage = usage
+        var cursorRanges = TokenUsageRanges.empty
+        cursorRanges.today = TokenUsageRange(tokens: 50000, hit: 25.0, in: 30000, out: 10000, cr: 10000, cw: 0, reason: 0, cost: 0.85, requests: 42)
+        cursorUsage.cursor.available = true
+        cursorUsage.cursor.usage = TokenUsageStat(ranges: cursorRanges)
+
+        let cursorLine = UsageSummaryBuilder.line(
+            forToolID: "cursor", usage: cursorUsage, range: .today, visibility: allVisible
+        )
+        try expect(cursorLine != nil, "cursor line must resolve by toolID")
+        try expect(cursorLine?.name == "Cursor", "cursor line name")
+        try expect(cursorLine?.tokens == 50000, "cursor line tokens")
+        try expect(cursorLine?.calls == 42, "cursor line requests")
+        try expect(cursorLine?.cost == 0.85, "cursor line cost")
+
+        // Provider account totals stay separately shareable and cannot inflate local totals.
+        var accountUsage = cursorUsage
+        accountUsage.zai.usage = TokenUsageStat(ranges: cursorRanges)
+        let localLines = UsageSummaryBuilder.toolLines(usage: usage, range: .today, visibility: allVisible)
+        let accountLines = UsageSummaryBuilder.toolLines(usage: accountUsage, range: .today, visibility: allVisible)
+        try expect(accountLines.contains { $0.id == "cursor" }, "cursor must remain independently shareable")
+        try expect(accountLines.contains { $0.id == "zai" }, "z.ai must remain independently shareable")
+        try expect(UsageSummaryBuilder.totals(for: accountLines) == UsageSummaryBuilder.totals(for: localLines),
+                   "provider account lines must not change any local overview total")
+        var hideAccounts = allVisible
+        hideAccounts.cursor = false
+        hideAccounts.zai = false
+        let hiddenAccounts = UsageSummaryBuilder.toolLines(usage: accountUsage, range: .today, visibility: hideAccounts)
+        try expect(!hiddenAccounts.contains { $0.id == "cursor" || $0.id == "zai" },
+                   "hidden account usage must be omitted")
+
+        // Grok Bot 卡片按 toolID "grok-bot" 取这一行（支持回退显示的区间）。
+        var grokBotUsage = usage
+        var grokBotRanges = QoderRanges.empty
+        grokBotRanges.last_week = QoderRange(sessions: 0, calls: 38, turns: 38)
+        grokBotUsage.grokBot.ranges = grokBotRanges
+
+        let grokBotLine = UsageSummaryBuilder.line(
+            forToolID: "grok-bot", usage: grokBotUsage, range: .lastWeek, visibility: allVisible
+        )
+        try expect(grokBotLine != nil, "grok-bot line must resolve for displayed range")
+        try expect(grokBotLine?.name == "Grok Bot", "grok-bot line name")
+        try expect(grokBotLine?.calls == 38, "grok-bot line calls")
+        try expect(grokBotLine?.extra?.contains("38") == true, "grok-bot line extra messages")
+
         var hideDevin = allVisible
         hideDevin.devin = false
         try expect(!UsageSummaryBuilder.text(
@@ -230,7 +301,7 @@ struct UsageSummaryBuilderCheck {
         // 分享图按展示名取主题色；漏登记的工具会掉进默认灰（Muse/Kimi/Prime/DeepSeek 曾全灰）。
         stage("gui-done")
         let gray = NSColor(Theme.tTertiary)
-        for name in ["Prime Agent", "DeepSeek Harness", "Kimi Code", "Muse Code"] {
+        for name in ["Prime Agent", "DeepSeek Harness", "Kimi Code", "Muse Code", "GitHub Copilot", "Cursor", "Grok Bot", "z.ai"] {
             let tint = NSColor(UsageShareImage.tint(for: name))
             try expect(!tint.isEqual(gray), "\(name) share tint must not be gray")
         }

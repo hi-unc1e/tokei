@@ -498,6 +498,7 @@
 "默认只读 ~/.grok 本地日志，不访问网络" = "Par défaut, lit uniquement les journaux locaux ~/.grok, aucun accès réseau";
 "默认只读本机 Grok 日志中的额度快照，不访问网络。开启后才会用本地登录凭据请求 Grok 账单接口，以便拿到最新剩余额度。" = "Par défaut, lit uniquement les instantanés des journaux locaux Grok, sans accès réseau. Si activé, interroge l'API de facturation Grok avec les identifiants locaux.";
 "（当前范围无可复制的用量）" = "(Aucune consommation partageable dans cette plage)";
+"仅输出" = "Sortie uniquement";
 
 /* Windows 与性能指标 */
 "打开主窗口" = "Ouvrir la fenêtre principale";
@@ -513,3 +514,7 @@
 "平均输出速度（含等待）" = "Vitesse moyenne (attente incluse)";
 "平均速度（含等待）" = "Vitesse moy. (attente incluse)";
 "输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度" = "Tokens de sortie ÷ durée enregistrée ; sur %@ requêtes, %@ incluent l’attente du premier token. La vitesse de génération seule est indisponible.";
+"按 API 价估算；缺少完整明细时，周期首尾按 token 占比分摊" = "Estimé aux tarifs API ; les extrémités du cycle sont réparties selon les tokens si les détails complets manquent";
+"这个周期约花了 %@" = "Environ %@ sur ce cycle";
+"本周期已花" = "Ce cycle";
+"上次周额度重置到现在，所有设备合计，按 API 价折算" = "Depuis la dernière réinitialisation du quota hebdomadaire, tous appareils confondus, aux tarifs API";

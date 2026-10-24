@@ -5,6 +5,10 @@ struct UsageToolVisibility: Equatable {
     var claude = true
     var codex = true
     var gemini = true
+    var cursor = true
+    var zed = true
+    var sub2api = true
+    var zai = true
     var grok = true
     var grokBot = true
     var qoder = true
@@ -26,6 +30,7 @@ struct UsageToolVisibility: Equatable {
     var kimicode = true
     var musecode = true
     var cmdcode = true
+    var copilot = true
     var devin = true
     var minimax = true
 
@@ -79,7 +84,9 @@ enum UsageSummaryBuilder {
     }
 
     static func totals(for lines: [Line]) -> Totals {
-        Totals(
+        // Provider account aggregates may overlap the local tool records.
+        let lines = lines.filter { $0.id != "cursor" && $0.id != "zai" }
+        return Totals(
             cost_cny: lines.compactMap(\.cost_cny).reduce(0, +),
             cost: lines.compactMap(\.cost).reduce(0, +),
             tokens: lines.compactMap(\.tokens).reduce(0, +),
@@ -205,6 +212,44 @@ enum UsageSummaryBuilder {
             )
             if !line.isEmpty { lines.append(line) }
         }
+        if visibility.cursor, let r = usage.cursor.usage?.ranges.get(range) {
+            let total = r.totalTokens
+            let line = Line(
+                id: "cursor", name: "Cursor",
+                cost_cny: (r.cost_cny ?? 0) > 0 ? r.cost_cny : nil,
+                cost: r.cost > 0 ? r.cost : nil,
+                tokens: total > 0 ? total : nil,
+                sessions: r.sessions > 0 ? r.sessions : nil,
+                calls: r.requests > 0 ? r.requests : nil,
+                input: r.hasComponents ? r.in : nil,
+                output: r.hasComponents ? r.out : nil,
+                cacheRead: r.cr > 0 ? r.cr : nil,
+                cacheWrite: r.cw > 0 ? r.cw : nil,
+                reason: r.reason > 0 ? r.reason : nil,
+                hit: r.hit > 0 ? r.hit : nil,
+                extra: nil
+            )
+            if !line.isEmpty { lines.append(line) }
+        }
+        if visibility.zai, let r = usage.zai.usage?.ranges.get(range) {
+            let total = r.totalTokens
+            let line = Line(
+                id: "zai", name: "z.ai",
+                cost_cny: (r.cost_cny ?? 0) > 0 ? r.cost_cny : nil,
+                cost: r.cost > 0 ? r.cost : nil,
+                tokens: total > 0 ? total : nil,
+                sessions: r.sessions > 0 ? r.sessions : nil,
+                calls: r.requests > 0 ? r.requests : nil,
+                input: r.hasComponents ? r.in : nil,
+                output: r.hasComponents ? r.out : nil,
+                cacheRead: r.cr > 0 ? r.cr : nil,
+                cacheWrite: r.cw > 0 ? r.cw : nil,
+                reason: r.reason > 0 ? r.reason : nil,
+                hit: r.hit > 0 ? r.hit : nil,
+                extra: nil
+            )
+            if !line.isEmpty { lines.append(line) }
+        }
         if visibility.grok {
             let r = usage.grok.ranges.get(range)
             let tokens = r.usage_available ? (r.in + r.out + r.cr + r.reason) : r.tokens
@@ -228,19 +273,22 @@ enum UsageSummaryBuilder {
             let r = usage.grokBot.ranges.get(range)
             let accountUsage = usage.grokBot.quota.usage?.ranges.get(range)
                 ?? TokenUsageRange()
+            let total = accountUsage.totalTokens
             let line = Line(
                 id: "grok-bot", name: "Grok Bot",
+                cost_cny: (accountUsage.cost_cny ?? 0) > 0 ? accountUsage.cost_cny : nil,
                 cost: accountUsage.cost > 0 ? accountUsage.cost : nil,
-                tokens: accountUsage.totalTokens > 0 ? accountUsage.totalTokens : nil,
-                sessions: r.sessions,
+                tokens: total > 0 ? total : nil,
+                sessions: r.sessions > 0 ? r.sessions : (accountUsage.sessions > 0 ? accountUsage.sessions : nil),
                 calls: accountUsage.requests > 0
                     ? accountUsage.requests
-                    : (r.calls > 0 ? r.calls : nil),
+                    : (r.calls > 0 ? r.calls : (r.turns > 0 ? r.turns : nil)),
                 input: accountUsage.hasComponents ? accountUsage.in : nil,
                 output: accountUsage.hasComponents ? accountUsage.out : nil,
                 cacheRead: accountUsage.cr > 0 ? accountUsage.cr : nil,
                 cacheWrite: accountUsage.cw > 0 ? accountUsage.cw : nil,
-                reason: nil, hit: nil,
+                reason: accountUsage.reason > 0 ? accountUsage.reason : nil,
+                hit: accountUsage.hit > 0 ? accountUsage.hit : nil,
                 extra: r.turns > 0 ? L("%@ 条消息", r.turns) : nil
             )
             if !line.isEmpty { lines.append(line) }
@@ -344,6 +392,10 @@ enum UsageSummaryBuilder {
             appendTokenTool(&lines, id: "cmdcode", name: "Command Code",
                             range: usage.cmdcode.ranges.get(range))
         }
+        if visibility.copilot {
+            appendTokenTool(&lines, id: "copilot", name: "GitHub Copilot",
+                            range: usage.copilot.ranges.get(range), includesCredits: true)
+        }
         if visibility.devin {
             appendTokenTool(&lines, id: "devin", name: "Devin",
                             range: usage.devin.ranges.get(range))
@@ -382,16 +434,19 @@ enum UsageSummaryBuilder {
         includesCost: Bool = true, includesCredits: Bool = false,
         reasonIncludedInOutput: Bool = false
     ) {
-        let total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
-        let extra = includesCredits && r.credits > 0
+        let outputOnly = id == "copilot"
+        let includesCost = includesCost && !outputOnly
+        let total = outputOnly ? r.out + r.reason : r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
+        if outputOnly && total == 0 && r.sessions == 0 && r.credits == 0 { return }
+        let extra = outputOnly ? L("仅输出") + (r.credits > 0 ? " · \(Fmt.credits(r.credits)) Premium Requests" : "") : includesCredits && r.credits > 0
             ? "\(Fmt.credits(r.credits)) Credits" : nil
         let line = Line(
             id: id, name: name, cost_cny: includesCost ? r.cost_cny : nil,
             cost: includesCost ? r.cost : nil,
             tokens: total, sessions: r.sessions, calls: nil,
-            input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
+            input: outputOnly ? nil : r.in, output: r.out, cacheRead: outputOnly ? nil : r.cr, cacheWrite: outputOnly ? nil : r.cw,
             reason: r.reason > 0 ? r.reason : nil,
-            hit: r.hit > 0 ? r.hit : nil, extra: extra
+            hit: !outputOnly && r.hit > 0 ? r.hit : nil, extra: extra
         )
         if !line.isEmpty { lines.append(line) }
     }

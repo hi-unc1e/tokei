@@ -69,7 +69,24 @@ for fname in usage.30s.py pricing.json pricing_overrides.json; do
     fi
 done
 
-# 4. 写配置
+# 4. 检测现有解码能力；安装器不修改系统 Python 或安装包。
+if python3 - >/dev/null 2>&1 <<'PY'
+try:
+    from compression import zstd
+except ImportError:
+    import zstandard
+PY
+then
+    echo "[✓] zstd 解码已可用"
+else
+    echo "[!] 缺少 zstd 解码器：OpenClaw 压缩事件暂时跳过"
+    echo "    可使用 Python 3.14+，或手动创建隔离环境："
+    echo "    python3 -m venv \"$TOKEI_DIR/venv\""
+    echo "    \"$TOKEI_DIR/venv/bin/python\" -m pip install zstandard"
+    echo "    安装后请用该隔离解释器运行采集器，并相应调整同步脚本的 python3。"
+fi
+
+# 5. 写配置
 python3 - "$SYNC_DIR" "$NAME" "$INTERVAL" > "$TOKEI_DIR/config.json" <<'PY'
 import json
 import sys
@@ -84,7 +101,7 @@ print()
 PY
 echo "[✓] 配置已写入 $TOKEI_DIR/config.json"
 
-# 5. 创建同步脚本
+# 6. 创建同步脚本
 SYNC_SCRIPT="$TOKEI_DIR/sync.sh"
 cat > "$SYNC_SCRIPT" <<'SYNCEOF'
 #!/usr/bin/env bash
@@ -99,7 +116,7 @@ SYNCEOF
 chmod +x "$SYNC_SCRIPT"
 echo "[✓] 同步脚本: $SYNC_SCRIPT"
 
-# 6. 添加 crontab
+# 7. 添加 crontab
 CRON_LINE="*/$INTERVAL * * * * $SYNC_SCRIPT >/dev/null 2>&1"
 (crontab -l 2>/dev/null | grep -v "tokei/sync.sh"; echo "$CRON_LINE") | crontab -
 echo "[✓] Cron 已配置: 每 ${INTERVAL} 分钟同步"
@@ -110,5 +127,5 @@ echo "  首次同步: bash $SYNC_SCRIPT"
 echo "  查看状态: cat $SYNC_DIR/$NAME.json | python3 -m json.tool | head -5"
 echo ""
 
-# 7. 立即执行一次
+# 8. 立即执行一次
 bash "$SYNC_SCRIPT" && echo "[✓] 首次同步成功" || echo "[!] 首次同步失败,请检查 Git 权限"

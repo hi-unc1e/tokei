@@ -30,6 +30,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` | JSONL, protocol 1.5 `usage.record` / protocol 1 `StatusUpdate.token_usage` |
 | Muse Code | `${TOKEI_MUSE_DIR:-~/.local/share/muse}/sessions/*/*/*/session.jsonl` | JSONL, `model_completed` 事件 `usage` + `model` |
 | Command Code | `${TOKEI_CMDCODE_DIR:-~/.commandcode}/projects/*/*.jsonl` | JSONL, assistant message 顶层 `usage` + `costUsd` |
+| GitHub Copilot | `${TOKEI_COPILOT_DIR:-~/.copilot}/session-state/*/events.jsonl`（兼容 SQLite `assistant_usage_events`） | JSONL, `session.shutdown` 的 `modelMetrics` + `totalPremiumRequests` |
 | Kimi Code(额度) | `${KIMI_CODE_HOME:-~/.kimi-code}/credentials/kimi-code.json` → `api.kimi.com/coding/v1/usages` | 本机登录态只读查询，见 §5 |
 | ZCode | `~/.zcode/cli/db/db.sqlite` | SQLite, `model_usage` Token 明细 |
 | MiMoCode | `$XDG_DATA_HOME/mimocode/mimocode*.db`，macOS 使用 `~/Library/Application Support/mimocode/` | SQLite, OpenCode-compatible `message` 数据 |
@@ -153,6 +154,41 @@ protocol 1.5 为每个 Agent 单独保存 `agents/<agent>/wire.jsonl`。Tokei �
 只读取真实会话转录中的 assistant `usage`，跳过 checkpoints、prompts 与 hooks audit
 sidecar，并按消息身份与时刻跨文件去重。兼容顶层和嵌套消息结构，项目取自 session
 记录的 `cwd`，时刻取自 `timestamp`（ISO 8601，兼容 `Z` 后缀）。
+
+**GitHub Copilot** — 先按物理路径解析 SQLite/JSONL 来源，合并符号链接别名，避免同一文件被重复扫描。
+SQLite 中解析成功且时间有效的用量行所包含的全部非空会话 ID（跨所有日期的 `day.sessions`）为权威覆盖集合；
+该集合中的会话只采用数据库用量，JSONL 仅补充集合外的会话。无效时间的数据库行不遮蔽 JSONL；
+不按时间接近或 token 数值推测是否重叠，也不只取数据库第一条会话。
+这项优先级适用于整个 JSONL 会话，数据库已覆盖的会话不会额外叠加 JSONL 的 Premium Requests。
+
+对仍需 JSONL 补充的会话，优先读取 `session.shutdown` 的 `modelMetrics`（会话级汇总）。
+同一会话已有可用模型汇总时，忽略所有文件中的 generic 请求明细，避免汇总和明细重复计算；
+缺少可用汇总时，兼容顶层或 `data.usage`、顶层 token 字段以及旧版嵌套 `usage.input`。
+
+根据 [GitHub 官方 Streaming session events 的 assistant.usage 定义](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events#assistantusage)，
+`reasoningTokens` 已确认是 `outputTokens` 的子集，`outputTokens` 包含全部输出：
+- 推理 = `min(max(rawReason, 0), max(rawOutput, 0))`。
+- 非推理输出 `out` = `max(rawOutput, 0) - reason`，已知 token 总量及本地输出吞吐 = `out + reason`。
+- `coverage = "output_only"`：卡片、概览、分享均标注 Output only，仅展示输出、推理、会话、模型和 Premium Requests。
+- Premium Requests = `totalPremiumRequests`，单列展示，不推算剩余额度。
+- 输入、缓存读/写和完整 API 成本暂缓展示、统计；规范化 `in/cr/cw/cost` 使用结构兼容的 0 占位，UI 省略这些未知单元格。
+- 原始输入/缓存数只保存在缓存 `_reported_in/_reported_cr/_reported_cw` 数字元数据，不进入公开 canonical token、成本、模型或项目总量。
+- shutdown、generic、SQLite、账本、模型与项目采用同一已知输出口径；不按模型价格推算完整 API 费用。
+
+输入与缓存读/写的包含关系仍待 runtime owner 确认，见
+[SDK issue #2834](https://github.com/github/copilot-sdk/issues/2834) 和
+[SDK PR #2837](https://github.com/github/copilot-sdk/pull/2837)。不从输入扣减缓存，也不相加呈现未经核实的完整 token 总量。
+`reasoningTokens` 属于输出的关系已有上述官方文档确认。例如原始 input100/output20/reason7，规范化 out13/reason7，
+已知总量20，Premium Requests 独立；该输出指标不声称覆盖输入或精确账单。
+
+汇总按 `session.start.startTime`（或 shutdown 的 `sessionStartTime`）归日；fallback 按每条记录自身
+的 timestamp/startTime/createdAt/created_at 归日。会话和项目保留各条记录的 ID、cwd/workspace/gitRoot，
+缺失时回退到会话元数据。只缓存用量与身份/时间元数据，不缓存对话正文。
+
+镜像优先按会话内稳定事件/请求 ID 合并。缺 ID 但有事件时刻时，按时刻、项目和规范化用量匹配镜像，
+同一文件内的重复出现次数保留；不同时间的分段会合并。仅无 ID 且无事件时刻的记录使用同会话
+最完整文件作为兜底，此类无身份的分段仍无法可靠区分。SQLite 缓存同时检查 WAL，并保留项目/会话归属。
+计量版本递增后，仍有原日志的日期通过既有账本版本迁移规则重算；原日志已清理的历史日期保留输出记录并迁移到相同已知输出口径，移除模糊输入/缓存及成本贡献。数据库与 JSONL 去重升级会重算仍有源日志的日期；日志已清理的存档无法重新辨认过往跨来源重复。
 
 **Prime Agent** — Usage 字段与 Pi Coding Agent 一致:
 - 输入 = `usage.input`

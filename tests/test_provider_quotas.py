@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -28,6 +29,7 @@ class ProviderQuotaTests(unittest.TestCase):
         self.old_user_dir = USAGE._USER_DIR
         self.old_cache = getattr(USAGE, "PROVIDER_QUOTA_CACHE", None)
         self.old_scan_cache = getattr(USAGE, "ANTIGRAVITY_SCAN_CACHE", None)
+        self.old_credentials_cache = USAGE.ANTIGRAVITY_CREDENTIALS_CACHE
         self.old_env = dict(USAGE.os.environ)
 
     def tearDown(self):
@@ -36,6 +38,7 @@ class ProviderQuotaTests(unittest.TestCase):
             USAGE.PROVIDER_QUOTA_CACHE = self.old_cache
         if self.old_scan_cache is not None:
             USAGE.ANTIGRAVITY_SCAN_CACHE = self.old_scan_cache
+        USAGE.ANTIGRAVITY_CREDENTIALS_CACHE = self.old_credentials_cache
         USAGE.os.environ.clear()
         USAGE.os.environ.update(self.old_env)
 
@@ -43,6 +46,7 @@ class ProviderQuotaTests(unittest.TestCase):
         USAGE._USER_DIR = str(root)
         USAGE.PROVIDER_QUOTA_CACHE = str(root / "provider_quota_cache.json")
         USAGE.ANTIGRAVITY_SCAN_CACHE = str(root / "antigravity_scan_cache.json")
+        USAGE.ANTIGRAVITY_CREDENTIALS_CACHE = str(root / "antigravity_credentials.json")
 
     def test_provider_queries_are_opt_in_except_local_antigravity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -724,15 +728,19 @@ class ProviderQuotaTests(unittest.TestCase):
             self.isolate_cache(Path(tmp))
             Path(USAGE.ANTIGRAVITY_SCAN_CACHE).write_text(
                 json.dumps({"empty_at": 900}), encoding="utf-8")
-            with mock.patch.object(
-                    USAGE.subprocess, "run", return_value=mock.Mock(
-                        stdout=output.encode("utf-8") if USAGE._IS_WINDOWS else output)) as run:
+            # This test counts process scans, independently of credential discovery.
+            with mock.patch.object(USAGE, "_discover_antigravity_credentials", return_value={}), \
+                    mock.patch.object(
+                        USAGE.subprocess, "run", return_value=mock.Mock(
+                            stdout=output.encode("utf-8") if USAGE._IS_WINDOWS else output)) as run:
                 processes = USAGE._antigravity_running_processes(now_epoch=2000)
                 self.assertEqual([item["pid"] for item in processes], [321])
                 self.assertFalse(Path(USAGE.ANTIGRAVITY_SCAN_CACHE).exists())
 
                 USAGE._antigravity_running_processes(now_epoch=2001)
                 self.assertEqual(run.call_count, 2)
+                if not USAGE._IS_WINDOWS:
+                    self.assertEqual(run.call_args.args[0], ["/bin/ps", "-ax", "-o", "pid=,command="])
 
     def test_antigravity_request_is_loopback_only_and_sends_csrf(self):
         with mock.patch.object(USAGE, "_provider_json_request", return_value={}) as request:
@@ -797,6 +805,250 @@ class ProviderQuotaTests(unittest.TestCase):
             self.assertNotIn(provider, snapshot)
         self.assertEqual(snapshot["grok_bot"], payload["grok_bot"])
         self.assertIn("cursor", payload)
+
+    def test_antigravity_proc_env_edge_cases(self):
+        self.assertEqual(USAGE._antigravity_proc_env(0), {})
+        self.assertEqual(USAGE._antigravity_proc_env(-1), {})
+        self.assertEqual(USAGE._antigravity_proc_env(None), {})
+
+    def test_antigravity_discover_credentials_from_environ(self):
+        with mock.patch.dict(os.environ, {
+            "ANTIGRAVITY_CSRF_TOKEN": "env-token",
+            "ANTIGRAVITY_LS_ADDRESS": "localhost:63041",
+        }):
+            creds = USAGE._discover_antigravity_credentials([{"pid": 12345}])
+            self.assertEqual(creds[12345], ("env-token", 63041))
+
+    def test_antigravity_discover_credentials_from_cache_and_proc_env(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=True):
+            self.isolate_cache(Path(tmp))
+            cred_cache = Path(tmp) / "antigravity_credentials.json"
+            cred_cache.write_text(json.dumps({
+                "credentials": {"123": {"token": "cached-token", "port": 50001}}
+            }))
+            with mock.patch.object(USAGE, "ANTIGRAVITY_CREDENTIALS_CACHE", str(cred_cache)):
+                creds = USAGE._discover_antigravity_credentials([{"pid": 123}])
+                self.assertEqual(creds[123], ("cached-token", 50001))
+
+            with mock.patch.object(USAGE, "ANTIGRAVITY_CREDENTIALS_CACHE", str(Path(tmp) / "missing.json")), \
+                    mock.patch.object(USAGE, "_antigravity_proc_env", return_value={
+                        "ANTIGRAVITY_CSRF_TOKEN": "proc-token",
+                        "ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:50002",
+                    }):
+                creds = USAGE._discover_antigravity_credentials([{"pid": 456}])
+                self.assertEqual(creds[456], ("proc-token", 50002))
+
+    def test_antigravity_endpoints_dual_protocol_and_csrf(self):
+        process = {"pid": 999, "csrf_token": "token-xyz", "ls_port": 63041}
+        with mock.patch.object(USAGE, "_antigravity_listening_ports", return_value=[63040, 63041]):
+            endpoints = USAGE._antigravity_endpoints(process)
+            self.assertIn(("http", 63040, "token-xyz", True), endpoints)
+            self.assertIn(("https", 63040, "token-xyz", True), endpoints)
+            self.assertIn(("http", 63041, "token-xyz", True), endpoints)
+            self.assertIn(("https", 63041, "token-xyz", True), endpoints)
+
+        no_csrf = {"pid": 999, "csrf_token": ""}
+        with mock.patch.object(USAGE, "_antigravity_listening_ports", return_value=[63040]):
+            endpoints = USAGE._antigravity_endpoints(no_csrf)
+            self.assertIn(("http", 63040, "", False), endpoints)
+            self.assertIn(("https", 63040, "", False), endpoints)
+
+    def test_antigravity_fetch_fallback_on_http_or_ssl_error(self):
+        process = {"pid": 888, "csrf_token": "valid-token"}
+        endpoints = [
+            ("http", 63040, "valid-token", True),
+            ("https", 63040, "valid-token", True),
+        ]
+        summary = {"groups": [{"displayName": "Gemini Models", "buckets": [
+            {"bucketId": "gemini-5h", "remainingFraction": 0.8},
+        ]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.isolate_cache(Path(tmp))
+            with mock.patch.object(USAGE, "_antigravity_running_processes", return_value=[process]), \
+                    mock.patch.object(USAGE, "_antigravity_endpoints", return_value=endpoints):
+                # 第一次请求 (http) 报 400，第二次请求 (https) 成功
+                with mock.patch.object(USAGE, "_antigravity_request",
+                                       side_effect=[RuntimeError("HTTP 400"), summary, {}]) as request:
+                    quota = USAGE.fetch_antigravity_quota()
+                    self.assertTrue(quota["available"])
+                    self.assertEqual(quota["windows"][1]["used_pct"], 20.0)
+                    self.assertEqual(request.call_count, 3)
+
+    def test_antigravity_csrf_bypasses_environment_and_system_proxies(self):
+        import urllib.request
+        token = "fixture-only-csrf"
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                self.server.records.append(dict(self.headers))
+                body = json.dumps({"source": self.server.label}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        servers = []
+        for label in ("proxy", "target"):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            server.label, server.records = label, []
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(thread.join)
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+            servers.append(server)
+        proxy, target = servers
+        proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+        process = {"pid": 0, "csrf_token": token, "ls_port": target.server_port}
+        with mock.patch.object(USAGE, "_antigravity_listening_ports", return_value=[]):
+            endpoint = next(e for e in USAGE._antigravity_endpoints(process) if e[0] == "http")
+        for source in ("environment", "system"):
+            with self.subTest(source=source):
+                proxy.records.clear()
+                target.records.clear()
+                environment = {"http_proxy": proxy_url} if source == "environment" else {}
+                discovery = (mock.patch("urllib.request.getproxies", return_value={"http": proxy_url})
+                             if source == "system" else mock.patch(
+                                 "urllib.request.getproxies", wraps=urllib.request.getproxies))
+                # No environment or system loopback exclusion may protect this request.
+                with mock.patch.dict(os.environ, environment, clear=True), discovery, \
+                        mock.patch("urllib.request.proxy_bypass", return_value=False):
+                    self.assertNotIn("NO_PROXY", os.environ)
+                    self.assertNotIn("no_proxy", os.environ)
+                    response = USAGE._antigravity_request(endpoint, "/fixture", {})
+                self.assertEqual(proxy.records, [], "proxy must receive no request or headers")
+                self.assertEqual(response, {"source": "target"})
+                self.assertEqual(len(target.records), 1)
+                self.assertEqual(target.records[0]["X-Codeium-Csrf-Token"], token)
+
+    def test_provider_external_https_keeps_proxy_support_and_tls_verification(self):
+        import ssl
+        import urllib.request
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"{}"
+        proxy_url = "http://127.0.0.1:1"
+        built = []
+        original_build = urllib.request.build_opener
+        def capture_opener(*handlers):
+            opener = original_build(*handlers)
+            built.append(opener)
+            return opener
+        with mock.patch("urllib.request.getproxies", return_value={"https": proxy_url}), \
+                mock.patch("urllib.request.build_opener", side_effect=capture_opener) as build, \
+                mock.patch("urllib.request.OpenerDirector.open", return_value=response), \
+                mock.patch.object(ssl, "_create_unverified_context") as insecure:
+            USAGE._provider_json_request(
+                "https://quota.fixture.invalid/usage", allow_insecure_loopback_tls=True)
+        insecure.assert_not_called()
+        self.assertFalse(any(isinstance(h, urllib.request.ProxyHandler) for h in build.call_args.args))
+        proxies = [h for h in built[0].handlers if isinstance(h, urllib.request.ProxyHandler)]
+        self.assertEqual(proxies[0].proxies, {"https": proxy_url})
+        tls = [h for h in built[0].handlers if isinstance(h, urllib.request.HTTPSHandler)]
+        self.assertEqual(len(tls), 1)
+        context = tls[0]._context or ssl.create_default_context()
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+
+    def test_provider_proxy_bypass_is_limited_to_loopback_hosts(self):
+        import urllib.request
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"{}"
+        for host, local in (("127.0.0.1", True), ("127.0.0.2", True),
+                            ("[::1]", True), ("localhost", True),
+                            ("localhost.fixture.invalid", False), ("192.0.2.1", False)):
+            with self.subTest(host=host), \
+                    mock.patch("urllib.request.build_opener", wraps=urllib.request.build_opener) as build, \
+                    mock.patch("urllib.request.OpenerDirector.open", return_value=response):
+                USAGE._provider_json_request(f"http://{host}/fixture")
+            proxies = [h for h in build.call_args.args if isinstance(h, urllib.request.ProxyHandler)]
+            self.assertEqual(len(proxies), int(local))
+            if local:
+                self.assertEqual(proxies[0].proxies, {})
+
+    def test_exhausted_provider_cache_rechecks_hourly_and_validates_future_skew(self):
+        now = 1800000000
+        quota = {"available": True, "windows": [
+            {"used_pct": 100, "reset": now + 7 * 86400},
+        ]}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.isolate_cache(Path(tmp))
+            for fetched_at, expected in ((now - 3599, True), (now - 3600, False),
+                                         (now - 86400, False), (now + 301, False),
+                                         (now + 300, True)):
+                USAGE._save_provider_quota_cache("antigravity", "fixture", quota, fetched_at=fetched_at)
+                for reader in (lambda **kw: USAGE._cached_provider_quota("antigravity", "fixture", **kw),
+                               lambda **kw: USAGE._latest_cached_provider_quota("antigravity", **kw)):
+                    with self.subTest(fetched_at=fetched_at, reader=reader):
+                        self.assertEqual(reader(max_age=60, now_epoch=now) is not None, expected)
+
+    def test_exhausted_provider_cache_cannot_hide_another_reset_window(self):
+        now = 1800000000
+        for used in (20, 100):
+            for reverse in (False, True):
+                windows = [{"used_pct": used, "reset": now - 1},
+                           {"used_pct": 100, "reset": now + 86400}]
+                if reverse:
+                    windows.reverse()
+                quota = {"available": True, "windows": windows}
+                with self.subTest(used=used, reverse=reverse), tempfile.TemporaryDirectory() as tmp:
+                    self.isolate_cache(Path(tmp))
+                    USAGE._save_provider_quota_cache("antigravity", "fixture", quota, fetched_at=now - 500)
+                    self.assertIsNone(USAGE._cached_provider_quota(
+                        "antigravity", "fixture", max_age=60, now_epoch=now))
+                    self.assertIsNone(USAGE._latest_cached_provider_quota(
+                        "antigravity", max_age=60, now_epoch=now))
+
+    def test_provider_cache_historical_fallback_keeps_history_and_skew_check(self):
+        now = 1800000000
+        with tempfile.TemporaryDirectory() as tmp:
+            self.isolate_cache(Path(tmp))
+            for exhausted in (False, True):
+                quota = {"available": True, "windows": [
+                    {"used_pct": 100 if exhausted else 20, "reset": now + 86400},
+                    {"used_pct": 20, "reset": now - 1},
+                ]}
+                USAGE._save_provider_quota_cache("antigravity", "fixture", quota, fetched_at=now - 86400)
+                for reader in (lambda **kw: USAGE._cached_provider_quota("antigravity", "fixture", **kw),
+                               lambda **kw: USAGE._latest_cached_provider_quota("antigravity", **kw)):
+                    history = reader(max_age=None, now_epoch=now, stale=True)
+                    self.assertEqual(history["windows"], quota["windows"])
+                    self.assertTrue(history["stale"])
+                    self.assertEqual(history["source"], "cache")
+                    history["windows"].clear()
+                    self.assertEqual(len(reader(max_age=None, now_epoch=now)["windows"]), 2)
+                    USAGE._save_provider_quota_cache("antigravity", "fixture", quota, fetched_at=now + 301)
+                    self.assertIsNone(reader(max_age=None, now_epoch=now))
+                    USAGE._save_provider_quota_cache("antigravity", "fixture", quota, fetched_at=now - 86400)
+
+    def test_antigravity_quota_exhausted_sleep_retention(self):
+        quota = {
+            "available": True,
+            "windows": [
+                {"id": "antigravity-gemini-weekly", "used_pct": 50.0, "reset": 1800003600},
+                {"id": "antigravity-gemini-5h", "used_pct": 100.0, "reset": 1800001800},
+            ],
+            "updated": 1800000000,
+        }
+        reset_at = USAGE._provider_quota_exhausted_reset_at(quota, now_epoch=1800000100)
+        self.assertEqual(reset_at, 1800001800.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.isolate_cache(Path(tmp))
+            marker = "exhausted-marker"
+            USAGE._save_provider_quota_cache("antigravity", marker, quota, fetched_at=1800000000)
+
+            # 在 reset 之前，即使超过常规 TTL（如 300 秒），也依然复用缓存
+            cached = USAGE._cached_provider_quota("antigravity", marker, max_age=60, now_epoch=1800000500)
+            self.assertIsNotNone(cached)
+            self.assertTrue(cached["available"])
+
+            # 超过 reset 之后，正常过期返回 None
+            expired = USAGE._cached_provider_quota("antigravity", marker, max_age=60, now_epoch=1800002000)
+            self.assertIsNone(expired)
 
 
 if __name__ == "__main__":

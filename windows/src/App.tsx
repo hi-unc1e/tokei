@@ -136,7 +136,12 @@ function CardCopyButton({ spec, range, copy }: { spec: CardSpec; range: RangeKey
   const done = copy.state.tool === spec.id;
   const onClick = async () => {
     const { copySingleToolImage, currentShareVisibility } = await import("./lib/share");
-    if (usage && (await copySingleToolImage(spec.id, usage, range, currentShareVisibility(), lastUpdated))) copy.markTool(spec.id);
+    let targetRange = range;
+    if (spec.id === "grok-bot" && usage) {
+      const { grokBotDisplay } = await import("./cards/grok");
+      targetRange = grokBotDisplay(usage, range).key;
+    }
+    if (usage && (await copySingleToolImage(spec.id, usage, targetRange, currentShareVisibility(), lastUpdated))) copy.markTool(spec.id);
   };
   return (
     <button

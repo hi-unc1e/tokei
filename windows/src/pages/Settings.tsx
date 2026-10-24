@@ -36,7 +36,7 @@ const SETTINGS_CARD_ORDER = [
   "claude", "codex", "gemini", "cursor", "zed", "sub2api", "zai", "grok", "grok-bot",
   "qoder", "qoderwork", "qodercli", "qodercli_cn", "hermes", "zcode", "mimocode", "openclaw",
   "pi", "prime_agent", "workbuddy", "workbuddy-ai", "codebuddy", "deepseek_harness", "opencode",
-  "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "devin", "minimax",
+  "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "copilot", "devin", "minimax",
 ];
 
 /** 设置页上的名字与卡片「未检测到本地数据」里的名字不同的几张。 */

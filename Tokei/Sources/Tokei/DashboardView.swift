@@ -424,6 +424,7 @@ struct DashboardView: View {
         case "kimicode": return Theme.kimicode
         case "musecode": return Theme.musecode
         case "cmdcode": return Theme.cmdcode
+        case "copilot": return Theme.copilot
         case "devin": return Theme.devin
         case "minimax": return Theme.minimax
         default: return Theme.claude
@@ -1145,6 +1146,7 @@ struct DashboardView: View {
         appendTokenModels(usage.musecode.ranges.get(key).models, tool: "musecode", suffix: "Muse Code",
                           reasonIncludedInOutput: true, to: &out)
         appendTokenModels(usage.cmdcode.ranges.get(key).models, tool: "cmdcode", suffix: "Command Code", to: &out)
+        appendTokenModels(usage.copilot.ranges.get(key).models, tool: "copilot", suffix: "GitHub Copilot", to: &out)
         appendTokenModels(usage.devin.ranges.get(key).models, tool: "devin", suffix: "Devin", to: &out)
         appendTokenModels(usage.minimax.ranges.get(key).models, tool: "minimax",
                           suffix: "MiniMax Code", to: &out)
@@ -1217,6 +1219,7 @@ struct DashboardView: View {
             + tokenUsageTotal(usage.kimicode.ranges.get(key))
             + tokenUsageTotal(usage.musecode.ranges.get(key), reasonIncludedInOutput: true)
             + tokenUsageTotal(usage.cmdcode.ranges.get(key))
+            + tokenUsageTotal(usage.copilot.ranges.get(key))
             + tokenUsageTotal(usage.devin.ranges.get(key))
             + tokenUsageTotal(usage.minimax.ranges.get(key))
     }
@@ -1241,6 +1244,7 @@ struct DashboardView: View {
             + usage.kimicode.ranges.get(key).cost
             + usage.musecode.ranges.get(key).cost
             + usage.cmdcode.ranges.get(key).cost
+            + usage.copilot.ranges.get(key).cost
             + usage.devin.ranges.get(key).cost
             + usage.minimax.ranges.get(key).cost
     }

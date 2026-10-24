@@ -11,6 +11,7 @@ import { qwenworkCard } from "./qwenwork";
 import type { CardSpec } from "./spec";
 import {
   cmdcodeCard,
+  copilotCard,
   codebuddyCard,
   deepseekHarnessCard,
   kimicodeCard,
@@ -57,4 +58,5 @@ export const CARDS: CardSpec[] = [
   kimicodeCard,
   musecodeCard,
   cmdcodeCard,
+  copilotCard,
 ];

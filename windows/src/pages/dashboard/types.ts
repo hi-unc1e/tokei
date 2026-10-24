@@ -65,6 +65,7 @@ export interface DailyCost {
   kimicode?: number | null;
   musecode?: number | null;
   cmdcode?: number | null;
+  copilot?: number | null;
   cny_by_tool?: Record<string, number> | null;
   cost_cny?: number | null;
   total: number;

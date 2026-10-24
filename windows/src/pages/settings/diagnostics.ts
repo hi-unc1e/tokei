@@ -10,7 +10,7 @@ const TOOLS = [
   "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
   "codebuddy",
   "deepseek_harness",
-  "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "prime_agent",
+  "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "copilot", "prime_agent",
   "devin", "minimax",
 ];
 

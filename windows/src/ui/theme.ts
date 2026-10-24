@@ -34,6 +34,7 @@ export const Theme = {
   kimicode: [0.2, 0.78, 0.66],
   musecode: [0.1, 0.42, 0.92],
   cmdcode: [0.22, 0.68, 0.32],
+  copilot: [0.54, 0.34, 0.90],
   devin: [0.42, 0.47, 0.98],
   minimax: [0.91, 0.25, 0.4],
   orange: [1.0, 0.62, 0.04],

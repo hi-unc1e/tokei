@@ -75,6 +75,7 @@ export interface TokenUsageOptions {
   showsCost?: boolean;
   showsCredits?: boolean;
   reasonIncludedInOutput?: boolean;
+  outputOnly?: boolean;
 }
 
 /** 通用卡片的正文（卡头之下）：总量、指标格、未计价说明、按模型。 */
@@ -86,21 +87,23 @@ export function TokenUsageBody({
   showsCost = true,
   showsCredits = false,
   reasonIncludedInOutput = false,
+  outputOnly = false,
 }: { r: TokenUsageRange; tint: RGB; ctx: CardContext } & TokenUsageOptions) {
   const r = tokenRange(raw);
-  const total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason);
-  const credit = showsCredits && r.credits > 0 ? [metric("circle.hexagongrid.fill", "Credits", Fmt.credits(r.credits))] : [];
+  const total = outputOnly ? r.out + r.reason : r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason);
+  const credit = showsCredits && r.credits > 0 ? [metric("circle.hexagongrid.fill", outputOnly ? "Premium Requests" : "Credits", Fmt.credits(r.credits))] : [];
   return (
     <>
-      <CostHeadline value={Fmt.human(total)} caption={L("%@ 总量", ctx.rangeLabel)} />
+      <CostHeadline value={Fmt.human(total)} caption={outputOnly ? `${ctx.rangeLabel} · ${L("仅输出")}` : L("%@ 总量", ctx.rangeLabel)} />
       <MetricGrid
-        top={showsCost ? [metric("dollarsign.circle", L("≈成本"), estimatedCostLabel(raw))] : []}
-        hit={r.hit}
-        extra={[...credit, ...tokenUsageMetrics(raw, inclusiveIO), ...perfMetrics(r.perf)]}
+        top={showsCost && !outputOnly ? [metric("dollarsign.circle", L("≈成本"), estimatedCostLabel(raw))] : []}
+        hit={outputOnly ? 0 : r.hit}
+        extra={[...credit, ...(outputOnly ? [metric("arrow.up", L("输出"), Fmt.human(r.out)), metric("brain", L("推理"), Fmt.human(r.reason))] : tokenUsageMetrics(raw, inclusiveIO)), ...perfMetrics(r.perf)]}
         tint={tint}
       />
-      {showsCost && <UnpricedModelsNote models={r.models} />}
-      {r.models.length > 0 && (
+      {showsCost && !outputOnly && <UnpricedModelsNote models={r.models} />}
+      {outputOnly && r.models.map(m => <div key={m.model_id ?? m.name}>{data(m.name)} · {L("仅输出")}: {Fmt.human(m.out + (m.reason ?? 0))} ({L("输出")} {Fmt.human(m.out)} · {L("推理")} {Fmt.human(m.reason ?? 0)})</div>)}
+      {!outputOnly && r.models.length > 0 && (
         <ModelDisclosure
           rows={tokenModelRows(r.models, { reasonIncludedInOutput, inclusiveIO, perf: r.perf })}
           tint={tint}
@@ -116,7 +119,7 @@ export function TokenUsageCard({ title, r, tint, ctx, ...options }: { title: str
   return (
     <VStack>
       <CardHead title={title} tint={tint} sessions={sessions} />
-      {sessions > 0 ? <TokenUsageBody r={r} tint={tint} ctx={ctx} {...options} /> : <EmptyHint />}
+      {sessions > 0 || (options.showsCredits && (r.credits ?? 0) > 0) ? <TokenUsageBody r={r} tint={tint} ctx={ctx} {...options} /> : <EmptyHint />}
     </VStack>
   );
 }
@@ -160,6 +163,7 @@ function tokenCard(config: TokenUsageCardConfig): CardSpec {
         showsCost={config.showsCost}
         showsCredits={config.showsCredits}
         reasonIncludedInOutput={config.reasonIncludedInOutput}
+        outputOnly={config.outputOnly}
       />
     ),
   };
@@ -253,6 +257,19 @@ export const cmdcodeCard = tokenCard({
   title: "Command Code",
   visibleKey: "showCmdCode",
   tint: Theme.cmdcode,
+});
+
+export const copilotCard = tokenCard({
+  id: "copilot",
+  key: "copilot",
+  name: "GitHub Copilot",
+  title: "GitHub Copilot",
+  visibleKey: "showCopilot",
+  tint: Theme.copilot,
+  showsCost: false,
+  outputOnly: true,
+  showsCredits: true,
+  activeWhenTokensOrCredits: true,
 });
 
 // ---- Kimi Code：本地 token 统计 + 官方额度（5h 滚动窗口 + 订阅周期） ----

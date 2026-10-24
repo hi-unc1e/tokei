@@ -245,7 +245,10 @@ class BridgeTests(unittest.TestCase):
                 B.fetch_grok_data(requester=request)
 
     def test_electron_gcm_and_scoped_dpapi_formats(self):
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        except ImportError:
+            self.skipTest("cryptography is not installed")
         key = b"k" * 32
         nonce = b"n" * 12
         encoded = base64.b64encode(b"v10" + nonce + AESGCM(key).encrypt(nonce, b"fixture", None)).decode()

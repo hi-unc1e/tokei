@@ -59,6 +59,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 | **Kimi Code** | Token（输入/输出/缓存）、会话、模型、项目、配额（5h / 订阅周期） |
 | **Muse Code** | Token（输入/输出/缓存/推理）、成本、模型、项目 |
 | **Command Code** | Token（输入/输出/缓存）、成本、模型、项目 |
+| **GitHub Copilot** | 已核实输出（含推理，Output only）、Premium Requests、会话、模型、项目（本地日志） |
 | **Devin** | Token（输入/输出/缓存）、成本、模型、会话；日/周/消息额度、套餐与账号、超额余额 |
 | **MiniMax Code** | Token（输入/输出/缓存）、成本、模型、会话、项目；可选 Token Plan 5 小时 / 周额度（填入 Key 后联网查询） |
 
@@ -82,6 +83,16 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - 每日成本折线图
 - 每周热力图
 - 工具用量占比分析
+
+### 本机总输出速率（macOS）
+- 卡片区顶部展示最近最多 60 秒所有本机任务的总输出 tok/s，并发任务相加
+- 保留原有请求平均输出速度；基于日志采样估算，包含推理，排除输入、缓存、云端账号用量及同步设备
+- [计算口径与采样限制](docs/local-output-throughput.md)
+
+### Codex 额外重置动态（macOS，可选）
+- 默认开启，可在「设置 → 隐私与额度」关闭；Codex 卡片显示 AIHOT 整理的公开重置 / 发卡公告
+- 已公告的事件显示预计生效时段和倒计时；超过预计时间仍需等待确认，不推算尚未公布的下一次重置
+- 额度重置与重置卡发放分开显示，支持原帖跳转、离线缓存和来源延迟提示；[数据与状态说明](docs/codex-reset-announcements.md)
 
 ### 时间维度
 - 今天 / 昨天 / 本周 / 上周 / 本月 / 今年
@@ -113,6 +124,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - Codex 额度使用本机 Codex 登录态读取官方接口；重置卡每天最多自动查询一次
 - Kimi Code 额度使用 Kimi Code CLI 已有的本机登录态读取官方接口。Tokei 只读 `access_token`，从不使用同目录的 `refresh_token` 代为刷新（避免顶掉 CLI 自己的登录态）；登录态过期时直接跳过查询，卡片改为标注读数已过期而不是继续显示旧百分比。可用 `TOKEI_KIMI_LIVE_QUOTA=0` 关闭
 - Grok 实时额度默认关闭，可选择只读本地日志
+- Codex 额外重置动态默认开启，可关闭；启用时每 10 分钟匿名访问 AIHOT 公共公告接口，不发送 Codex 凭据、用量或项目数据。公告缓存只保存在本机，不参与多设备同步
 - Grok Bot 本地活动直接读取会话快照，快照不含 Token、模型和成本，Tokei 不按文本量估算。官方用量查询默认关闭；用户明确授权后，Tokei 临时解密 Grok Bot 当前登录态，只查询 `sand` 客户端的官方 Token、模型、成本和额度。登录 Token 只在内存中使用
 - 千问办公额度默认关闭；开启后仅调用官方桌面端的 `127.0.0.1` MCP，由已运行并登录的千问办公查询官方额度
 - Tokei 不读取或解密千问办公的 `auth-v2.dat`、浏览器 Cookie 或 `.status.json` 账号资料；仅用 `.status.json` 文件元数据使切换账号后的额度缓存失效，也不会自动启动千问办公
@@ -228,7 +240,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl`（含真实 token + billing 额度）+ `sessions/*/*/{summary,signals}.json`；可选实时账单接口（设置里默认关闭） |
 | Grok Bot | `~/Library/Application Support/Grok Bot/sand-client-persistence/*.blob`（本地活动）；可选 Sand 官方 usage-events / 额度接口（首次需授权 Grok Bot 钥匙串，设置里默认关闭） |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
-| OpenClaw | `~/.openclaw/state/openclaw.sqlite` 动态发现 agent SQLite；兼容旧版 `agents/*/sessions/*.jsonl` |
+| OpenClaw | `~/.openclaw/state/openclaw.sqlite` 动态发现 agent SQLite；`transcript_events` 正文兼容 `event_json` 与 `event_zstd`（Python 3.14+ 标准库或已安装的 zstandard 解码）两种存储；兼容旧版 `agents/*/sessions/*.jsonl` |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
 | Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
@@ -426,3 +438,14 @@ For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.
 ## License
 
 MIT
+
+### GitHub Copilot 计量覆盖
+
+Copilot 目前只统计可核实的输出（含推理），卡片、概览和分享标注 **Output only**。
+推理是原始输出的子集，规范化为非推理输出 `out = rawOutput - min(rawOutput, rawReason)`，推理独立存储，已知总量 `out + reason` 只计算一次。
+Premium Requests 独立展示，不推测剩余额度。输入、缓存读/写及完整 API 成本暂缓展示或计入总量；原始数字只作为本地缓存元数据保留。
+输入/缓存包含关系仍待 runtime owner 确认，见 [SDK issue #2834](https://github.com/github/copilot-sdk/issues/2834) 和 [SDK PR #2837](https://github.com/github/copilot-sdk/pull/2837)。
+reasoning 子集定义见 [官方 assistant.usage 文档](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events#assistantusage)。模型、项目和账本也采用相同已知输出口径。
+
+Copilot 同时发现 SQLite 与 JSONL 时，数据库有效用量行的全部会话 ID 优先；JSONL 只补充数据库未覆盖的会话。
+物理路径会解析符号链接去重；不按时间或 token 相等推测来源重叠。数据库已覆盖的会话不会另外叠加 JSONL 用量或 Premium Requests。

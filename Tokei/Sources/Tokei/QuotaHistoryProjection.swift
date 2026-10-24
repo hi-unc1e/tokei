@@ -256,8 +256,13 @@ struct QuotaHistoryProjection {
                     window: window,
                     consumed: day.consumed,
                     refills: day.refills,
-                    isComplete: !day.uncertain && !missingHistory
-                )
+                    isComplete: isComplete
+                ))
+            }
+        }
+        return consumptions.sorted { a, b in
+            if a.dayStart != b.dayStart {
+                return a.dayStart > b.dayStart
             }
         }
         let windowOrder: (String) -> Int = { name in tool.windowNames.firstIndex(of: name) ?? 0 }

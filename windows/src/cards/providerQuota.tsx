@@ -235,9 +235,15 @@ function providerQuotaCard(config: ProviderQuotaCardConfig): CardSpec {
       if (config.id === "cursor") return totalTokens(r) > 0 || (r.requests ?? 0) > 0;
       return Boolean(quota.available) || totalTokens(r) > 0;
     },
-    presentation: (ctx) => (totalTokens(usageOf(ctx)) > 0 ? "standard" : "compact"),
-    // Mac 版这几张额度卡（Cursor、Zed、Sub2API、z.ai）的卡头没有复制按钮。
-    copyable: () => false,
+    presentation: (ctx) => {
+      const r = usageOf(ctx);
+      return totalTokens(r) > 0 || (r.requests ?? 0) > 0 ? "standard" : "compact";
+    },
+    // 有用量数据时允许复制分享图（Cursor、z.ai；无用量纯额度卡不显示）。
+    copyable: (ctx) => {
+      const r = usageOf(ctx);
+      return totalTokens(r) > 0 || (r.requests ?? 0) > 0;
+    },
     render: (ctx) => {
       const quota = quotaOf(ctx, config.key);
       const r = usageOf(ctx);

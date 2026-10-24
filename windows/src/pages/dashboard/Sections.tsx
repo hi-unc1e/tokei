@@ -134,6 +134,8 @@ export function modelTint(tool: string): RGB {
       return Theme.musecode;
     case "cmdcode":
       return Theme.cmdcode;
+    case "copilot":
+      return Theme.copilot;
     case "devin":
       return Theme.devin;
     case "minimax":
