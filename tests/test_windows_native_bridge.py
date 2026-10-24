@@ -264,26 +264,6 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(B.BridgeError, "unsupported_format"):
             B.decrypt_secret(unsupported, self.profile, mock.Mock(side_effect=AssertionError("must not decrypt")))
 
-    def test_activity_has_four_fields_and_stable_random_id(self):
-        sent = []
-        with mock.patch.object(B.platform, "version", return_value="10.0.22631"):
-            B.report_activity(self.root / "Telemetry", "1.0.46", lambda payload: sent.append(payload) or True)
-            B.report_activity(self.root / "Telemetry", "1.0.46", lambda payload: sent.append(payload) or False)
-        self.assertEqual(len(sent), 2)
-        self.assertEqual(set(sent[0]), {"installation_id", "app_version", "os_name", "os_version"})
-        self.assertEqual(sent[0]["installation_id"], sent[1]["installation_id"])
-        self.assertEqual(uuid.UUID(sent[0]["installation_id"]).version, 4)
-        self.assertEqual(sent[0]["os_version"], "10.0")
-
-    def test_corrupt_activity_state_is_preserved_without_a_new_identity(self):
-        folder = self.root / "Telemetry"
-        folder.mkdir()
-        (folder / "state.json").write_text("CORRUPT")
-        sender = mock.Mock()
-        B.report_activity(folder, "1.0.46", sender)
-        sender.assert_not_called()
-        self.assertEqual((folder / "state.json").read_text(), "CORRUPT")
-
     def test_redirect_never_receives_a_credential(self):
         visits = []
         class Handler(http.server.BaseHTTPRequestHandler):

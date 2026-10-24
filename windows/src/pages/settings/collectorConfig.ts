@@ -21,7 +21,6 @@ export const CARD_CONFIG_KEYS: Record<string, string> = {
 
 /** 「隐私与额度」里的开关：偏好键 → config.json 的键（都默认关）。 */
 export const PRIVACY_CONFIG_KEYS: Record<string, string> = {
-  shareBasicActivity: "share_basic_activity",
   claudeCLIQuotaEnabled: "claude_cli_quota_enabled",
   grokLiveQuotaEnabled: "grok_live_quota_enabled",
   grokBotQuotaEnabled: "grok_bot_quota_enabled",
@@ -67,7 +66,7 @@ export async function syncCollectorConfigOnLaunch(): Promise<void> {
     patch[configKey] = cardShown(visibleKey);
   }
   for (const [prefKey, configKey] of Object.entries(PRIVACY_CONFIG_KEYS)) {
-    patch[configKey] = getPref(prefKey, prefKey === "shareBasicActivity");
+    patch[configKey] = getPref(prefKey, false);
   }
   patch.minimax_quota_enabled = cardShown("showMiniMax") && (await minimaxKeyStored());
   await updateTokeiConfig(patch);

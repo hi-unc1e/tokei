@@ -245,13 +245,16 @@ struct QuotaHistoryProjection {
                 previous[window] = (remaining, point.timestamp)
             }
         }
-        // 拆成具名子表达式：单链 flatMap+sorted 的嵌套闭包会让类型检查超时
-        let rows: [QuotaDailyConsumption] = days.flatMap { (window: String, byDay: [Date: Day]) in
+        // 与上游同构：普通循环 + 拆开的排序闭包（两边都为规避类型检查超时做过重构，取上游形态）
+        var consumptions: [QuotaDailyConsumption] = []
+        for (window, byDay) in days {
             let oldest = byDay.keys.min()
-            return byDay.map { (start: Date, day: Day) -> QuotaDailyConsumption in
-                let missingHistory = start == oldest
-                    && TimeInterval(day.first) - start.timeIntervalSince1970 > edgeTolerance
-                return QuotaDailyConsumption(
+            for (start, day) in byDay {
+                let dayFirstInterval = TimeInterval(day.first)
+                let startInterval = start.timeIntervalSince1970
+                let missingHistory: Bool = (start == oldest) && ((dayFirstInterval - startInterval) > edgeTolerance)
+                let isComplete: Bool = !day.uncertain && !missingHistory
+                consumptions.append(QuotaDailyConsumption(
                     dayStart: start,
                     window: window,
                     consumed: day.consumed,
@@ -264,13 +267,9 @@ struct QuotaHistoryProjection {
             if a.dayStart != b.dayStart {
                 return a.dayStart > b.dayStart
             }
-        }
-        let windowOrder: (String) -> Int = { name in tool.windowNames.firstIndex(of: name) ?? 0 }
-        return rows.sorted { lhs, rhs in
-            if lhs.dayStart != rhs.dayStart {
-                return lhs.dayStart > rhs.dayStart
-            }
-            return windowOrder(lhs.window) < windowOrder(rhs.window)
+            let aIdx = tool.windowNames.firstIndex(of: a.window) ?? 0
+            let bIdx = tool.windowNames.firstIndex(of: b.window) ?? 0
+            return aIdx < bIdx
         }
     }
 
