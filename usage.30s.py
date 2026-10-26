@@ -36,6 +36,7 @@
 #                (assistant message 自带 usage + costUsd,按 message.id 去重;
 #                 inputTokens 含 cached,与 Codex 同口径)
 
+import calendar
 import os
 import sys
 import glob
@@ -292,6 +293,13 @@ QWENWORK_QUOTA_CACHE = _writable_path("qwenwork_quota_cache.json")
 PROVIDER_QUOTA_CACHE = _writable_path("provider_quota_cache.json")
 ANTIGRAVITY_SCAN_CACHE = _writable_path("antigravity_scan_cache.json")
 ANTIGRAVITY_CREDENTIALS_CACHE = _writable_path("antigravity_credentials.json")
+# IDE 会把语言服务器的 pid / 端口 / CSRF 写进 daemon/ls_*.json；CLI 目前不写。
+# 命令行走不通时靠这些文件兜底，读到之后仍要校验 pid 活着、端口真的在听。
+ANTIGRAVITY_DAEMON_DIRS = (
+    os.path.join(HOME, ".gemini", "antigravity", "daemon"),
+    os.path.join(HOME, ".gemini", "antigravity-ide", "daemon"),
+    os.path.join(HOME, ".gemini", "antigravity-backup", "daemon"),
+)
 
 # 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
 # pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
@@ -7485,6 +7493,26 @@ def _windows_native_bridge():
     return _WINDOWS_NATIVE_BRIDGE
 
 
+def _windows_process_alive(pid):
+    # Windows 上 os.kill(pid, 0) 会结束进程；只查询进程状态。
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == 5
+    try:
+        code = wintypes.DWORD()
+        return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259)
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def _grok_bot_helper_running(state):
     pid, started = state.get("pid"), state.get("started")
     if not isinstance(pid, int) or not isinstance(started, (int, float)):
@@ -7492,23 +7520,7 @@ def _grok_bot_helper_running(state):
     if _time.time() - started > _GROK_BOT_HELPER_MAX_RUNTIME:
         return False
     if _IS_WINDOWS:
-        # Windows 上 os.kill(pid, 0) 会结束进程；只查询进程状态。
-        import ctypes
-        from ctypes import wintypes
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel.OpenProcess.restype = wintypes.HANDLE
-        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-        kernel.GetExitCodeProcess.restype = wintypes.BOOL
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        handle = kernel.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return ctypes.get_last_error() == 5
-        try:
-            code = wintypes.DWORD()
-            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259)
-        finally:
-            kernel.CloseHandle(handle)
+        return _windows_process_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -8867,6 +8879,154 @@ def _discover_antigravity_credentials(processes=None):
     return discovered
 
 
+def _antigravity_pid_alive(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if _IS_WINDOWS:
+        return _windows_process_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _antigravity_port_open(port):
+    """端口上有没有活着的进程在听。只用来否掉过期 LS 地址,不做服务识别。"""
+    import socket
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return False
+    if not 0 < port <= 65535:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def _antigravity_daemon_credentials():
+    """IDE 的 daemon 发现文件里有 pid/端口/CSRF;命令行拿不到 token 时用它兜底。"""
+    found = []
+    for directory in ANTIGRAVITY_DAEMON_DIRS:
+        for path in glob.glob(os.path.join(directory, "ls_*.json")):
+            data = _load_json(path, {})
+            if not isinstance(data, dict):
+                continue
+            pid = _provider_integer(data.get("pid"))
+            token = data.get("csrfToken")
+            if not pid or not isinstance(token, str) or not token:
+                continue
+            if not _antigravity_pid_alive(pid):
+                continue
+            ports = [port for port in (_provider_integer(data.get("httpsPort")),
+                                       _provider_integer(data.get("httpPort")))
+                     if port]
+            found.append({"pid": pid, "token": token, "ports": ports, "path": path})
+    return found
+
+
+def _antigravity_merge_daemon_processes(processes, daemons):
+    """daemon 文件里 pid 还活着且端口在听的进程,即使 ps 没认出来也补进列表。"""
+    by_pid = {proc["pid"]: proc for proc in processes}
+    for entry in daemons:
+        pid = entry["pid"]
+        proc = by_pid.get(pid)
+        if not _antigravity_pid_alive(pid):
+            continue
+        listening = proc.get("ports") if proc is not None else None
+        if listening is None:
+            listening = _antigravity_listening_ports(pid)
+        live_ports = [port for port in entry["ports"] if port in listening]
+        if not live_ports:
+            continue
+        if proc is None:
+            proc = {
+                "pid": pid, "kind": "ide", "csrf_token": "",
+                "extension_port": None, "extension_csrf_token": None,
+                "ports": listening, "daemon_ports": live_ports,
+            }
+            processes.append(proc)
+            by_pid[pid] = proc
+        else:
+            proc["ports"] = listening
+        if not proc.get("csrf_token"):
+            proc["csrf_token"] = entry["token"]
+        if not proc.get("daemon_ports"):
+            proc["daemon_ports"] = live_ports
+    return processes
+
+
+def _antigravity_attach_credentials(processes, discovered):
+    """把发现的 token 挂到进程上;LS 端口已经没了的旧 token 直接丢弃。"""
+    candidates = {}
+    for proc in processes:
+        token, port = discovered.get(proc["pid"], discovered.get(0, (None, None)))
+        if token and not proc.get("csrf_token"):
+            candidates[proc["pid"]] = (token, port)
+    # 没有候选 token 就不必为每个进程跑一次 lsof;端点那边用到时会自己补。
+    if candidates:
+        for proc in processes:
+            if proc.get("ports") is None:
+                proc["ports"] = _antigravity_listening_ports(proc["pid"])
+        live_ports = set()
+        for proc in processes:
+            live_ports.update(proc.get("ports") or [])
+        for proc in processes:
+            token, port = candidates.get(proc["pid"], (None, None))
+            if not token:
+                continue
+            stale = bool(port) and port not in live_ports and not _antigravity_port_open(port)
+            if stale:
+                continue
+            proc["csrf_token"] = token
+            if port:
+                proc["ls_port"] = port
+    saved = {}
+    for proc in processes:
+        if proc.get("csrf_token"):
+            saved[str(proc["pid"])] = {
+                "token": proc["csrf_token"], "port": proc.get("ls_port")}
+    return saved
+
+
+def _antigravity_drop_credentials(pid):
+    """token 被服务端判无效时只删这一条,别把别的进程(比如 IDE)的凭据一起清掉。"""
+    try:
+        root = _load_json(ANTIGRAVITY_CREDENTIALS_CACHE, {})
+        credentials = root.get("credentials") if isinstance(root, dict) else None
+        if not isinstance(credentials, dict):
+            return
+        if credentials.pop(str(pid), None) is None:
+            return
+        _atomic_write_json(ANTIGRAVITY_CREDENTIALS_CACHE, {
+            "credentials": credentials,
+            "updated": int(datetime.now().timestamp()),
+        })
+    except OSError:
+        pass
+
+
+def _antigravity_error_priority(error):
+    """401/403 是凭据问题,比 SSL/连接错误更值得往上抛。"""
+    text = str(error or "")
+    if "HTTP 401" in text or "HTTP 403" in text:
+        return 3
+    if isinstance(error, TimeoutError) or "timed out" in text.lower():
+        return 2
+    return 1
+
+
 def _antigravity_running_processes(now_epoch=None):
     if _antigravity_scan_recently_empty(now_epoch):
         return []
@@ -8883,28 +9043,20 @@ def _antigravity_running_processes(now_epoch=None):
         except (OSError, subprocess.SubprocessError):
             return []
     processes = _antigravity_process_infos(output)
+    daemons = _antigravity_daemon_credentials()
+    if daemons:
+        processes = _antigravity_merge_daemon_processes(processes, daemons)
     if processes:
         discovered = _discover_antigravity_credentials(processes)
-        credentials_to_save = {}
-        for proc in processes:
-            token, port = discovered.get(proc["pid"], discovered.get(0, (None, None)))
-            if token and not proc.get("csrf_token"):
-                proc["csrf_token"] = token
-            if port and not proc.get("ls_port"):
-                proc["ls_port"] = port
-            if proc.get("csrf_token"):
-                credentials_to_save[str(proc["pid"])] = {
-                    "token": proc["csrf_token"],
-                    "port": proc.get("ls_port"),
-                }
-        if credentials_to_save:
-            try:
-                _atomic_write_json(ANTIGRAVITY_CREDENTIALS_CACHE, {
-                    "credentials": credentials_to_save,
-                    "updated": int(now_epoch if now_epoch is not None else datetime.now().timestamp()),
-                })
-            except OSError:
-                pass
+        credentials_to_save = _antigravity_attach_credentials(processes, discovered)
+        # 每次扫描都整份重写,顺手把已经退出的进程凭据清掉。
+        try:
+            _atomic_write_json(ANTIGRAVITY_CREDENTIALS_CACHE, {
+                "credentials": credentials_to_save,
+                "updated": int(now_epoch if now_epoch is not None else datetime.now().timestamp()),
+            })
+        except OSError:
+            pass
     _record_antigravity_scan(bool(processes), now_epoch)
     return processes
 
@@ -8937,9 +9089,15 @@ def _antigravity_endpoints(process):
         for token in (process.get("extension_csrf_token"), csrf):
             if token is not None:
                 endpoints.append(("http", extension_port, token, True))
-    ports = list(_antigravity_listening_ports(process["pid"]))
+    ports = process.get("ports")
+    ports = list(ports if ports is not None else _antigravity_listening_ports(process["pid"]))
+    for port in process.get("daemon_ports") or []:
+        if port not in ports:
+            ports.insert(0, port)
     ls_port = process.get("ls_port")
-    if ls_port and ls_port not in ports:
+    # 拿不到监听表(Windows / 没有 lsof)时保留旧行为;拿到了就只信真实在听的端口,
+    # 否则环境里残留的旧 LS 地址会被一遍遍重试,真正的 401 反而被 SSL 错误盖住。
+    if ls_port and ls_port not in ports and not ports:
         ports.insert(0, ls_port)
     for port in ports:
         endpoints.append(("http", port, csrf, requires_csrf))
@@ -9070,6 +9228,7 @@ def fetch_antigravity_quota():
         cached = _cached_provider_quota("antigravity", marker, _PROVIDER_QUOTA_TTL)
         if cached:
             return cached
+        process_error = None
         for endpoint in endpoints:
             try:
                 summary_payload = _antigravity_request(
@@ -9086,16 +9245,23 @@ def fetch_antigravity_quota():
                     _save_provider_quota_cache("antigravity", marker, quota)
                     return quota
             except Exception as error:
-                last_error = error
+                if process_error is None or (
+                        _antigravity_error_priority(error)
+                        > _antigravity_error_priority(process_error)):
+                    process_error = error
+        if process_error is not None:
+            # 只有服务端明确说凭据无效才丢弃;SSL/超时说明不了 token 好坏。
+            if _antigravity_error_priority(process_error) >= 3:
+                _antigravity_drop_credentials(process.get("pid"))
+            if last_error is None or (
+                    _antigravity_error_priority(process_error)
+                    > _antigravity_error_priority(last_error)):
+                last_error = process_error
         fallback = _cached_provider_quota(
             "antigravity", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
         if fallback:
             return fallback
     if last_error:
-        try:
-            os.remove(ANTIGRAVITY_CREDENTIALS_CACHE)
-        except OSError:
-            pass
         raise last_error
     return {}
 
@@ -18243,8 +18409,8 @@ def _load_dashboard_cache():
     return cache
 
 
-# ---------- 周额度消耗 ----------
-# 一个周期 = 两次「余量 100%」之间,起点取 resets_at - 7天。
+# ---------- 额度周期消耗 ----------
+# 一个周期 = 两次「余量 100%」之间,起点取 resets_at 往前一周或一个日历月。
 # 实测:resets_at 会不定期重锚(观测到的间隔有 0.75 / 2.1 / 7.0 天),所以历史边界
 # 推不出来,只能观测一次记一次 —— 见 _QUOTA_ANCHOR_FILE。
 # 周期边界落在半天,日级账本切不出来,所以整日部分取账本(权威,不受 CLI 清理旧日志
@@ -18257,7 +18423,7 @@ _QUOTA_ANCHOR_FILE = os.path.join(HOME, ".tokei", "quota_cycles.json")
 # resets_in_seconds 是整秒截断的,同一个锚点读出来会有几秒抖动。
 _QUOTA_ANCHOR_JITTER = 120
 _QUOTA_CYCLE_MIN_USED_PCT = 2
-# 有周额度窗口的三个工具 → 日表里的短键。
+# 有额度周期的三个工具 → 日表里的短键。
 _QUOTA_TOOLS = (("claude", "c"), ("codex", "x"), ("grok", "g"))
 
 
@@ -18530,8 +18696,9 @@ def _quota_window_tokens(devices, tool, key, start, end, self_events):
 
 
 def _quota_tool_reading(source, tool):
-    """从一份 payload/同步快照里取 (used_pct, reset_epoch, 读数时间);取不到返回 None。"""
+    """从一份 payload/同步快照里取 (used_pct, reset_epoch, 读数时间, window);取不到返回 None。"""
     data = (source or {}).get(tool) or {}
+    window = "week"
     if tool == "claude":
         if data.get("q7_stale"):
             return None
@@ -18541,15 +18708,15 @@ def _quota_tool_reading(source, tool):
             return None
         used, reset, updated = data.get("pw"), data.get("rw"), data.get("q_updated")
     else:
-        # Grok 也可能是月套餐,月窗口长度不定又没有数据可验证,先只认周。
-        if data.get("stale") or data.get("window") != "week":
+        window = data.get("window")
+        if data.get("stale") or window not in ("week", "month"):
             return None
         used, reset, updated = data.get("pct"), data.get("reset"), data.get("q_updated")
     if not isinstance(reset, (int, float)):
         reset = _iso_to_epoch(reset)
     if not isinstance(reset, (int, float)) or reset <= 0:
         return None
-    return used, int(reset), int(updated or 0)
+    return used, int(reset), int(updated or 0), window
 
 
 def _load_quota_anchors():
@@ -18579,13 +18746,14 @@ def _save_quota_anchors(anchors):
                 pass
 
 
-def _record_quota_anchor(anchors, tool, reset, used, now, confirmed_reset=False):
+def _record_quota_anchor(anchors, tool, reset, used, now, confirmed_reset=False, window="week"):
     """记下一次额度读数。同一个锚点只留一条,used 取见过的最大值。
 
     额度从有消耗的旧窗口回到 0%,同时 reset 前移到新窗口,已经足以确认提前重置。
     后续空闲时 reset 继续漂移不会连开新周期:只有紧邻的上一锚点有真实消耗时
     才确认这次 0% 重置。
     """
+    window = window if window in ("week", "month") else "week"
     used = float(used or 0)
     rows = anchors.setdefault(tool, [])
     previous = [
@@ -18600,18 +18768,22 @@ def _record_quota_anchor(anchors, tool, reset, used, now, confirmed_reset=False)
          latest_previous.get("max_used", 0) >= _QUOTA_CYCLE_MIN_USED_PCT)
     )
     for row in rows:
-        if abs(int(row.get("reset", 0)) - reset) <= _QUOTA_ANCHOR_JITTER:
+        if (row.get("window", "week") == window and
+                abs(int(row.get("reset", 0)) - reset) <= _QUOTA_ANCHOR_JITTER):
             changed = (
+                row.get("window") != window or
                 used > row.get("max_used", 0) or
                 now > row.get("last_seen", 0) or
                 (confirmed_reset and not row.get("confirmed_reset"))
             )
+            row["window"] = window
             row["max_used"] = max(row.get("max_used", 0), used)
             row["last_seen"] = max(row.get("last_seen", 0), now)
             if confirmed_reset:
                 row["confirmed_reset"] = True
             return changed
-    row = {"reset": reset, "first_seen": now, "last_seen": now, "max_used": used}
+    row = {"reset": reset, "first_seen": now, "last_seen": now, "max_used": used,
+           "window": window}
     if confirmed_reset:
         row["confirmed_reset"] = True
     rows.append(row)
@@ -18639,18 +18811,29 @@ def _merge_quota_anchors(anchors, incoming):
                 anchors, tool, int(reset),
                 used if isinstance(used, (int, float)) else 0,
                 int(seen) if isinstance(seen, (int, float)) else 0,
-                confirmed_reset=row.get("confirmed_reset") is True)
+                confirmed_reset=row.get("confirmed_reset") is True,
+                window=row.get("window", "week") if row.get("window") in ("week", "month") else "week")
     return anchors
 
 
-def _quota_anchor_cycles(anchors, tool, span, limit, now):
-    """→ [(start, end, max_used, 是否进行中)]，最新的排最前。
+def _quota_cycle_start(reset, window="week"):
+    """按窗口回推起点:月窗口保留本地时刻,超出上个月的日子取月末。"""
+    if window != "month":
+        return reset - _QUOTA_WEEK_HOURS * 3600
+    local = datetime.fromtimestamp(reset)
+    year, month = (local.year, local.month - 1) if local.month > 1 else (local.year - 1, 12)
+    day = min(local.day, calendar.monthrange(year, month)[1])
+    return int(local.replace(year=year, month=month, day=day).timestamp())
+
+
+def _quota_anchor_cycles(anchors, tool, limit, now):
+    """→ [(start, end, max_used, 是否进行中, window)]，最新的排最前。
 
     按 reset 排序而不是按观测顺序:陈旧的会话记录偶尔会抢赢新记录,
     照观测顺序切会切出负时长的区间。排序后每段时长天然为正。
     """
     rows = sorted(anchors.get(tool) or [], key=lambda r: int(r.get("reset", 0)))
-    # 窗口空着的时候 reset 会一直跟着 now+7d 漂,那不是真周期。真实消耗和
+    # 窗口空着的时候 reset 会一直跟着当前时间往后漂,那不是真周期。真实消耗和
     # 「旧窗口有消耗后回到 0%」两种证据都能确认周期;没有证据时只展示最新读数。
     rows = [
         row for row in rows
@@ -18658,19 +18841,31 @@ def _quota_anchor_cycles(anchors, tool, span, limit, now):
         row.get("confirmed_reset") is True
     ] or rows[-1:]
 
+    # 月末账单日会被短月截到月底;相邻月锚点足够接近时,沿用实际重置边界。
+    starts = []
+    for index, row in enumerate(rows):
+        start = _quota_cycle_start(int(row["reset"]), row.get("window", "week"))
+        if index > 0 and row.get("window") == "month":
+            previous = rows[index - 1]
+            previous_reset = int(previous["reset"])
+            if previous.get("window") == "month" and abs(previous_reset - start) <= 3 * 86400:
+                start = previous_reset
+        starts.append(start)
+
     cycles = []
     for index, row in enumerate(rows):
         reset = int(row["reset"])
-        start = reset - span
+        window = "month" if row.get("window") == "month" else "week"
+        start = starts[index]
         if index + 1 < len(rows):
-            end = min(reset, int(rows[index + 1]["reset"]) - span)
+            end = min(reset, starts[index + 1])
         else:
             end = reset
         if end > start:
             # 读数断了就不会再有新锚点,最后一条也可能早已过期 —— 那是历史,不是进行中。
             # 但「进行中」仍只能是最后一条:多标一条会被前端当成当前卡片,另一条就没了。
             current = index + 1 == len(rows) and reset > now
-            cycles.append((start, end, row.get("max_used", 0), current))
+            cycles.append((start, end, row.get("max_used", 0), current, window))
     return cycles[-limit:][::-1]
 
 
@@ -18689,7 +18884,8 @@ def _quota_cycle_specs(payload, devices, peer_anchors, now):
         for _name, _tools, snapshot, _daily in devices:
             reading = _quota_tool_reading(snapshot if snapshot else payload, tool)
             if reading:
-                dirty |= _record_quota_anchor(anchors, tool, reading[1], reading[0], now)
+                dirty |= _record_quota_anchor(anchors, tool, reading[1], reading[0], now,
+                                              window=reading[3])
     if dirty:
         _save_quota_anchors(anchors)
     for incoming in peer_anchors:
@@ -18734,20 +18930,19 @@ def build_quota_detail():
     payload, cache = _quota_detail_inputs()
     now = int(datetime.now().timestamp())
     devices, peer_anchors = _quota_device_ledgers()
-    span = _QUOTA_WEEK_HOURS * 3600
     charted, missing, anchors = _quota_cycle_specs(payload, devices, peer_anchors, now)
 
     planned = []
     for tool in charted:
-        for start, end, used, current in _quota_anchor_cycles(
-                anchors, tool, span, _QUOTA_CYCLE_HISTORY, now):
-            planned.append((tool, start, end, used, current))
+        for start, end, used, current, window in _quota_anchor_cycles(
+                anchors, tool, _QUOTA_CYCLE_HISTORY, now):
+            planned.append((tool, start, end, used, current, window))
 
-    codex_spans = [(s, e) for tool, s, e, _u, _c in planned if tool == "codex"]
+    codex_spans = [(s, e) for tool, s, e, _u, _c, _w in planned if tool == "codex"]
     keys = dict(_QUOTA_TOOLS)
     events = {}
     cycles = []
-    for tool, start, end, used, current in planned:
+    for tool, start, end, used, current, window in planned:
         if tool not in events:
             # Grok 没有带时间戳的事件缓存,只能靠账本的 hours。
             events[tool] = (_quota_claude_events(cache) if tool == "claude"
@@ -18757,6 +18952,7 @@ def build_quota_detail():
             devices, tool, keys[tool], start, end, events[tool])
         cycles.append({
             "tool": tool,
+            "window": window,
             "start": start,
             "end": end,
             "used_pct": used,
