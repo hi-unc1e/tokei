@@ -605,7 +605,6 @@
 "Codex 额外重置动态" = "Codex extra reset updates";
 "Grok Bot 的登录凭据格式暂不支持，请更新 Tokei。" = "Grok Bot's stored credential format is not supported; please update Tokei.";
 "上次公告状态，待重新核实" = "Last announcement pending re-verification";
-"上次周额度重置到现在，所有设备合计，按 API 价折算" = "Since last weekly reset, all devices combined, converted at API prices";
 "上次数据 %@" = "Last data %@";
 "上次检查：无待生效公告" = "Last check: no pending announcements";
 "下一次尚未公布，不预测固定周期" = "Next one not announced yet; no fixed cycle is assumed";
@@ -658,3 +657,8 @@
 "额度更新中…" = "Updating quota…";
 "额度重置" = "Quota reset";
 "默认开启，可随时关闭。每 10 分钟从 AIHOT 获取公开重置公告，不发送登录凭据或用量。预计时间仅供参考，不预测未公布的下一次重置；个人额度以 Codex 为准。" = "On by default, can be turned off. Fetches public reset announcements from AIHOT every 10 minutes; no credentials or usage are sent. Estimated times are informational only and never predict unannounced resets; your Codex balance is authoritative.";
+"%@ 月额度" = "%@-month quota";
+"Grok 还没有额度卡片：登录一次 grok.com 让 Tokei 抓到额度读数。" = "No Grok quota card yet: sign in to grok.com once so Tokei can pick up a quota reading.";
+"一个额度周期用了多少" = "How much of one quota period was used";
+"上次额度重置到现在，所有设备合计，按 API 价折算" = "Since the last quota reset, all devices combined, converted at API prices";
+"正在读取额度周期…" = "Reading quota cycles…";
