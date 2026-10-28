@@ -72,6 +72,7 @@
 "Cursor 模型" = "Cursor models";
 "Cursor 账号" = "Cursor account";
 "Gemini 周" = "Gemini weekly";
+"Gemini 4 Argon 周" = "Gemini 4 Argon weekly";
 "GitHub 已同步" = "GitHub synced";
 "Grok Bot 额度查询" = "Grok Bot quota lookup";
 "Grok Build / 本机 CLI 编程消耗，占用本周统一额度池的比例。" = "Grok Build / local CLI coding usage, as a share of this week's unified quota pool.";
@@ -126,6 +127,9 @@
 "今日" = "Today";
 "从上次额度回满算到下次回满" = "From last quota reset to next reset";
 "价格表" = "Price table";
+"价格核对已在后台进行" = "Price verification is already running in the background";
+"已核对 %@ 个 OpenAI 官方模型价格" = "Verified official prices for %@ OpenAI models";
+"%@ 价格核对失败，保留已有价格: %@" = "%@ price verification failed; keeping existing prices: %@";
 "任务" = "Tasks";
 "会话" = "Sessions";
 "会话额度" = "Session quota";
@@ -298,7 +302,7 @@
 "开启后使用 Grok Bot 自身登录态查询官方额度和 Token，并按 5 分钟缓存。首次使用时确认一次系统授权；专用只读助手会保留授权，Tokei 重启和升级无需重复确认。登录 Token 仅在助手进程内存中使用。" = "When enabled, uses Grok Bot's own login session to query official quota and tokens, cached for 5 min. Confirm the system prompt once on first use; a dedicated read-only helper keeps the authorization so restarts and upgrades need no re-confirmation. Login tokens stay in helper memory only.";
 "开放 API（api.x.ai）" = "Public API (api.x.ai)";
 "当前展示最近一次成功结果；登录态或网络恢复后会自动刷新。" = "Showing the last successful result; refreshes automatically once login or network recovers.";
-"当前时间范围内还没有检测到额度下降" = "No quota drop detected in this range yet";
+"当前时间范围内还没有检测到明显额度变化" = "No significant quota change detected in this range yet";
 "当前版本 %@" = "Current version %@";
 "当前组织" = "Current organization";
 "当前范围无可分享的用量" = "No shareable usage in this range";
@@ -338,7 +342,7 @@
 "数据面板" = "Dashboard";
 "无匹配项目" = "No matching projects";
 "无限期" = "No expiry";
-"日均" = "Daily avg";
+"日均成本" = "Daily avg cost";
 "日期" = "Date";
 "日限额" = "Daily limit";
 "日额度" = "Daily quota";
@@ -366,6 +370,11 @@
 "最大区间下降" = "Largest range drop";
 "最近一次 · %@" = "Latest · %@";
 "最近额度变化" = "Recent quota changes";
+"最近回满" = "Latest refill to 100%";
+"最近回升" = "Latest quota recovery";
+"回满" = "Refilled to 100%";
+"回升" = "Recovered";
+"查看曲线" = "View chart";
 "月" = "Month";
 "月剩余" = "Month remaining";
 "月额度" = "Monthly quota";
