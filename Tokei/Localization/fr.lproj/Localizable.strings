@@ -240,7 +240,6 @@
 "常规额度外" = "Au-delà du quota régulier";
 "平均深度" = "Instantané de contexte du jour";
 "年" = "Total aujourd'hui";
-"开启后使用 Grok Bot 自身登录态查询官方额度和 Token，并按 5 分钟缓存。首次使用时确认一次系统授权；专用只读助手会保留授权，Tokei 重启和升级无需重复确认。登录 Token 仅在助手进程内存中使用。" = "Une fois activé, utilise la session de Grok Bot pour consulter les quotas et tokens officiels (mis en cache 5 min). Confirmez l'invite système à la première utilisation ; l'assistant dédié conserve l'autorisation. Les jetons restent en mémoire de l'assistant.";
 "开放 API（api.x.ai）" = "API publique (api.x.ai)";
 "当前展示最近一次成功结果；登录态或网络恢复后会自动刷新。" = "Affichage du dernier résultat réussi ; s'actualise automatiquement dès que la connexion ou le réseau est rétabli.";
 "当前时间范围内还没有检测到明显额度变化" = "Aucun changement significatif de quota détecté dans cette plage";

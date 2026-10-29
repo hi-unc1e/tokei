@@ -299,7 +299,6 @@
 "平均深度" = "Avg depth";
 "年" = "Year";
 "广撒网" = "Wide Net";
-"开启后使用 Grok Bot 自身登录态查询官方额度和 Token，并按 5 分钟缓存。首次使用时确认一次系统授权；专用只读助手会保留授权，Tokei 重启和升级无需重复确认。登录 Token 仅在助手进程内存中使用。" = "When enabled, uses Grok Bot's own login session to query official quota and tokens, cached for 5 min. Confirm the system prompt once on first use; a dedicated read-only helper keeps the authorization so restarts and upgrades need no re-confirmation. Login tokens stay in helper memory only.";
 "开放 API（api.x.ai）" = "Public API (api.x.ai)";
 "当前展示最近一次成功结果；登录态或网络恢复后会自动刷新。" = "Showing the last successful result; refreshes automatically once login or network recovers.";
 "当前时间范围内还没有检测到明显额度变化" = "No significant quota change detected in this range yet";
@@ -629,3 +628,7 @@
 "一个额度周期用了多少" = "How much of one quota period was used";
 "上次额度重置到现在，所有设备合计，按 API 价折算" = "Since the last quota reset, all devices combined, converted at API prices";
 "正在读取额度周期…" = "Reading quota cycles…";
+"为避免系统授权弹窗，已暂停后台查询；历史统计保留" = "Background queries paused to avoid a system authorization prompt; history is preserved";
+"开启后使用 Grok Bot 自身登录态查询官方额度和 Token，并按 5 分钟缓存。已有授权会保留；未授权或授权失效时后台静默停止。系统授权窗口仅在主动点击授权时显示，登录 Token 仅在助手进程内存中使用。" = "When enabled, queries official quota and tokens with Grok Bot's own sign-in, cached for 5 minutes. An existing grant is kept; without a grant (or when it expires) background polling quietly stops. The system authorization prompt appears only when you click Authorize; the login token stays in helper-process memory only.";
+"当前时间范围内还没有检测到额度下降" = "No quota drop detected in the selected range yet";
+"日均" = "Daily avg";

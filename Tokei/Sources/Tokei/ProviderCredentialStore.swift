@@ -177,7 +177,36 @@ enum ProviderCredentialStore {
         overridesCacheLock.unlock()
     }
 
+    /// 禁用的提供方不得读取或导出其已保存的凭据（上游 c8b10a8 的门禁，
+    /// 合并时对 sub2api/zai/minimax 三支被 -X ours 覆盖丢失，此处补回）。
+    private static func collectOverrides() -> [String: String] {
+        var result: [String: String] = [:]
+        if providerQuotaEnabled("sub2api"), let token = token(for: .sub2api) {
+            result["SUB2API_API_KEY"] = token
+        }
+        if providerQuotaEnabled("zai"), let token = token(for: .zai) {
+            result["Z_AI_API_KEY"] = token
+        }
+        if providerQuotaEnabled("minimax"), let token = token(for: .minimax) {
+            result["TOKEI_MINIMAX_API_KEY"] = token
+        }
+        if providerQuotaEnabled("zed"), let credentials = zedCredentials() {
+            result["TOKEI_ZED_USER_ID"] = credentials.userID
+            result["TOKEI_ZED_ACCESS_TOKEN"] = credentials.accessToken
+        }
+        return result
+    }
+
     static func environmentOverrides() -> [String: String] {
+        // TOKEI_*_QUOTA 环境变量存在时（测试/显式覆盖），同步计算且不经缓存，
+        // 保证启用状态翻转立即生效；生产路径走异步 + TTL 缓存，避免反复触碰钥匙串。
+        let environment = ProcessInfo.processInfo.environment
+        let hasEnvOverride = ["sub2api", "zai", "minimax", "zed"].contains {
+            environment["TOKEI_\($0.uppercased())_QUOTA"] != nil
+        }
+        if hasEnvOverride {
+            return collectOverrides()
+        }
         if let cached = cachedOverrides() { return cached }
         overridesLookupGate.lock()
         let alreadyStuck = overridesLookupInFlight
@@ -194,17 +223,7 @@ enum ProviderCredentialStore {
                 overridesLookupInFlight = false
                 overridesLookupGate.unlock()
             }
-            var result: [String: String] = [:]
-            if let token = token(for: .sub2api) {
-                result["SUB2API_API_KEY"] = token
-            }
-            if let token = token(for: .zai) {
-                result["Z_AI_API_KEY"] = token
-            }
-            if providerQuotaEnabled("zed"), let credentials = zedCredentials() {
-                result["TOKEI_ZED_USER_ID"] = credentials.userID
-                result["TOKEI_ZED_ACCESS_TOKEN"] = credentials.accessToken
-            }
+            let result = collectOverrides()
             storeOverridesCache(result)
             semaphore.signal()
         }
