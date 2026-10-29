@@ -262,7 +262,7 @@
 "按模型 · %@" = "Par modèle · %@";
 "按量预算" = "Budget à l'usage";
 "授权 Grok Bot" = "Autoriser Grok Bot";
-"授权助手已更新：重新授权一次，读取更快、不受条数上限" = "Assistant mis à jour : réautorisez une fois pour une lecture plus rapide et sans limite";
+"授权助手需要更新：请主动重新授权，后台不会弹出授权窗口" = "L'assistant d'autorisation doit être mis à jour. Réautorisez quand vous le souhaitez ; aucune invite système en arrière-plan.";
 "重新授权" = "Réautoriser";
 "重新授权 Grok Bot" = "Réautoriser Grok Bot";
 "授权 Zed" = "Autoriser Zed";
@@ -535,3 +535,4 @@
 "一个额度周期用了多少" = "Quota consommé sur un cycle";
 "Grok 还没有额度卡片：登录一次 grok.com 让 Tokei 抓到额度读数。" = "Aucune carte de quota Grok : connectez-vous sur grok.com une fois pour que Tokei puisse relever le quota.";
 "Gemini 4 Argon 周" = "Gemini 4 Argon - semaine";
+"为避免系统授权弹窗，已暂停后台查询；历史统计保留" = "Les requêtes en arrière-plan sont suspendues pour éviter les invites système. L'historique est conservé.";

@@ -323,7 +323,7 @@
 "按模型 · %@" = "By model · %@";
 "按量预算" = "Pay-as-you-go budget";
 "授权 Grok Bot" = "Authorize Grok Bot";
-"授权助手已更新：重新授权一次，读取更快、不受条数上限" = "Helper updated: re-authorize once for faster reads with no event limit";
+"授权助手需要更新：请主动重新授权，后台不会弹出授权窗口" = "The authorization helper needs an update. Re-authorize when ready; background checks will not show system prompts.";
 "重新授权" = "Re-authorize";
 "重新授权 Grok Bot" = "Re-authorize Grok Bot";
 "授权 Zed" = "Authorize Zed";
