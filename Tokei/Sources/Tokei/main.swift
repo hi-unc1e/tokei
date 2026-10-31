@@ -373,6 +373,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // NSPopover 在全屏 Space 中重新选择屏幕和锚点。
         host.sizingOptions = []
         popover.contentViewController = host
+        // SwiftUI 的 colorScheme 不会改变 AppKit 绘制的箭头；外壳也跟随深色面板。
+        popover.appearance = NSAppearance(named: .darkAqua)
         popover.contentSize = panelLayout.contentSize
         panelLayout.onPageWidthChange = { [weak self] in
             // 等这一轮视图更新结束再动弹窗。
@@ -389,6 +391,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         PanelView.syncQoderIdeConfigOnLaunch()
         PanelView.syncGrokLiveQuotaConfigOnLaunch()
         PanelView.syncQwenWorkQuotaConfigOnLaunch()
+        let doubaoQuotaEnabled = UserDefaults.standard.bool(forKey: DoubaoWorkQuotaBridge.defaultsKey)
+        SyncManager.setDoubaoWorkQuotaEnabled(doubaoQuotaEnabled)
+        DoubaoWorkQuotaBridge.shared.configure(enabled: doubaoQuotaEnabled)
+        NotificationCenter.default.addObserver(forName: DoubaoWorkQuotaBridge.changed,
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.store.refresh()
+        }
         PanelView.syncProviderQuotaConfigOnLaunch()
         if var syncConfig = store.syncManager.config {
             let interval = SyncManager.normalizedSyncInterval(syncConfig.sync_interval)
@@ -436,6 +445,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
                 self?.togglePopover()
             }
+        }
+        if CommandLine.arguments.contains("--doubaowork-connect") {
+            DispatchQueue.main.async { DoubaoWorkQuotaBridge.shared.connect() }
         }
     }
 

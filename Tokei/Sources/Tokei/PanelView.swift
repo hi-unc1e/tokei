@@ -69,6 +69,7 @@ struct PanelView: View {
     @AppStorage("showZai") private var showZai = false
     @AppStorage("showGrok") private var showGrok = true
     @AppStorage("showGrokBot") private var showGrokBot = true
+    @AppStorage("showDoubaoWork") private var showDoubaoWork = true
     @AppStorage("showQoderIde") private var showQoder = true
     @AppStorage("showQoderWork") private var showQoderWork = true
     @AppStorage("showQoderCli") private var showQoderCli = true
@@ -98,6 +99,7 @@ struct PanelView: View {
     @AppStorage("grokBotQuotaEnabled") private var grokBotQuotaEnabled = false
     /// 默认关闭：开启后仅查询千问办公桌面端暴露在本机回环地址上的额度接口。
     @AppStorage("qwenWorkQuotaEnabled") private var qwenWorkQuotaEnabled = false
+    @AppStorage("doubaoWorkQuotaEnabled") private var doubaoWorkQuotaEnabled = false
     /// 默认关闭：仅在 Desktop 缓存不可用时复用 Claude Code CLI 登录态查询官方额度。
     @AppStorage("claudeCLIQuotaEnabled") private var claudeCLIQuotaEnabled = false
     /// 菜单栏额度来源（与显示卡片独立），每项是一个具体窗口。
@@ -119,6 +121,7 @@ struct PanelView: View {
             cursor: showCursor, zed: showZed, sub2api: showSub2API, zai: showZai,
             grok: showGrok,
             grokBot: showGrokBot,
+            doubaoWork: showDoubaoWork,
             qoder: showQoder, qoderwork: showQoderWork, qodercli: showQoderCli,
             qodercliCN: showQoderCliCN,
             hermes: showHermes, zcode: showZcode, mimocode: showMimoCode,
@@ -134,7 +137,7 @@ struct PanelView: View {
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showCursor, showZed, showSub2API, showZai,
-         showGrok, showGrokBot, showQoder, showQoderWork, showQoderCli, showQoderCliCN, showHermes,
+         showGrok, showGrokBot, showDoubaoWork, showQoder, showQoderWork, showQoderCli, showQoderCliCN, showHermes,
          showZcode, showMimoCode,
          showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
          showCodeBuddy,
@@ -185,8 +188,6 @@ struct PanelView: View {
                 if mode == .projects {
                     projectPanelContent
                         .frame(width: w, height: projectPanelHeight)
-                        .background(Theme.bg)
-                        .background(VisualEffect())
                         .environment(\.colorScheme, .dark)
                         .id(appLanguage)
                 } else {
@@ -199,16 +200,14 @@ struct PanelView: View {
                     }
                         .frame(width: w)
                         .frame(maxHeight: maxPanelHeight)
-                        .background(Theme.bg)
-                        .background(VisualEffect())
                         .environment(\.colorScheme, .dark)
                 }
             } else {
                 panelContent
                     .id(appLanguage)
                     .frame(width: w, alignment: .top)
-                    .background(Theme.bg)
-                    .background(VisualEffect())
+                    // 量自然高度时不要让页脚 Spacer 和卡片撑满探针的高度提案。
+                    .fixedSize(horizontal: false, vertical: true)
                     .environment(\.colorScheme, .dark)
             }
         }
@@ -218,7 +217,22 @@ struct PanelView: View {
             alignment: .top
         )
         .background {
-            if scrollable { Theme.bg }
+            if scrollable {
+                // Leave the top edge on the native popover material, shared with
+                // its arrow, then blend into the existing tinted panel background.
+                Theme.bg
+                    .background(VisualEffect())
+                    .mask(alignment: .top) {
+                        VStack(spacing: 0) {
+                            LinearGradient(colors: [.clear, .black],
+                                           startPoint: .top, endPoint: .bottom)
+                                .frame(height: 24)
+                            Color.black
+                        }
+                    }
+            } else {
+                Theme.bg.background(VisualEffect())
+            }
         }
         // 换到宽度不同的页面时，由 App 按新页面重新摆放弹窗（issue #105）。
         .onChange(of: mode) { next in
@@ -502,6 +516,9 @@ struct PanelView: View {
                          content: AnyView(grokBotBlock(
                             u.grokBot, grokBotDisplay.range, grokBotDisplay.usage,
                             displayedRange: grokBotDisplay.key))),
+            ToolCardItem(id: "doubaowork", name: "Doubao Work", visible: showDoubaoWork,
+                         active: u.doubaoWork.hasActivity, tint: Theme.doubaoWork,
+                         content: AnyView(doubaoWorkBlock(u.doubaoWork.ranges.get(sel)))),
             ToolCardItem(id: "qoder", name: "Qoder Desktop", visible: showQoder,
                          active: qr.calls > 0 || qr.in + qr.cached + qr.out > 0,
                          tint: Theme.qoder, content: AnyView(qoderIdeBlock(u.qoder, qr))),
@@ -1183,6 +1200,59 @@ struct PanelView: View {
             return Fmt.reset(epoch)
         }
         return L10n.data(detail.value)
+    }
+
+    @ViewBuilder
+    func doubaoWorkBlock(_ r: DoubaoWorkRange) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHead("Doubao Work", tint: Theme.doubaoWork, toolID: "doubaowork")
+            if let quota = store.usage?.doubaoWork.quota, !quota.windows.isEmpty {
+                ForEach(quota.windows.sorted { $0.window_type < $1.window_type }, id: \.window_type) { window in
+                    if window.less_than_one_percent && !window.hasReset() {
+                        HStack {
+                            Text(window.label).foregroundStyle(Theme.tSecondary)
+                            Spacer()
+                            Text(L("已用 <1%"))
+                            if let reset = window.reset {
+                                Text("· \(Fmt.reset(reset))")
+                                    .foregroundStyle(Theme.tTertiary)
+                            }
+                        }
+                        .font(.system(size: Theme.fontSize(11)))
+                        .opacity(quota.isFresh() ? 1 : 0.65)
+                    } else {
+                        quotaRow(title: L("%@剩余", window.label), pct: window.remaining,
+                                 reset: window.reset, tint: Theme.doubaoWork,
+                                 stale: !quota.isFresh() || window.hasReset())
+                    }
+                }
+                HStack {
+                    Text(DoubaoWorkStat.activityLabel(for: sel))
+                    Spacer()
+                    Text(Fmt.human(r.sessions)).monospacedDigit()
+                }
+                .font(.system(size: Theme.fontSize(10)))
+                .foregroundStyle(Theme.tSecondary)
+                if !quota.isFresh() {
+                    Text(L("上次读取的额度，等待刷新"))
+                        .font(.system(size: Theme.fontSize(8.5)))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+            } else {
+                CostHeadline(value: Fmt.human(r.sessions),
+                             caption: DoubaoWorkStat.activityLabel(for: sel), tint: Theme.doubaoWork)
+            }
+            Button { DoubaoWorkQuotaBridge.shared.connect() } label: {
+                Label(L("连接豆包账号查看额度"), systemImage: "person.crop.circle")
+                    .font(.system(size: Theme.fontSize(10)))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.doubaoWork)
+            Text(store.usage?.doubaoWork.displaySourceCaption ?? DoubaoWorkStat.sourceCaption)
+                .font(.system(size: Theme.fontSize(8.5)))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     // MARK: - Grok Bot 卡片
@@ -2895,6 +2965,7 @@ struct PanelView: View {
 
         }
         .onAppear {
+            guard !Shot.isOffline else { return }
             loginItem.refresh()
             loadProviderSettings()
             if let cfg = SyncManager.loadConfig() {
@@ -3009,28 +3080,22 @@ struct PanelView: View {
     var settingsMenuBarSection: some View {
         settingsSection("menubar.rectangle", L("菜单栏")) {
             settingsStackedValue(L("样式")) {
-                Picker(L("菜单栏样式"), selection: $menuBarStyle) {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 6),
+                                    GridItem(.flexible(), spacing: 6)], spacing: 6) {
                     ForEach(MenuBarStyle.allCases) { style in
-                        Text(style.label).tag(style.rawValue)
+                        menuBarStyleTile(style)
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .controlSize(.mini)
-                .font(.system(size: Theme.fontSize(9), weight: .medium))
-                .frame(width: settingsMenuPickerWidth)
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(L("菜单栏样式"))
             }
 
             settingsStackedValue(L("信息")) {
-                Picker(L("菜单栏信息量"), selection: $menuBarDensity) {
+                settingsFittingPicker(L("菜单栏信息量"), selection: $menuBarDensity) {
                     ForEach(MenuBarDensity.allCases) { density in
                         Text(density.label).tag(density.rawValue)
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .controlSize(.mini)
-                .frame(width: settingsMenuPickerWidth)
             }
 
             settingsStackedValue(L("额度来源")) {
@@ -3052,16 +3117,6 @@ struct PanelView: View {
                 .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
-
-            HStack {
-                Spacer()
-                MenuBarStylePreview(
-                    style: MenuBarStyle(rawValue: menuBarStyle) ?? .system,
-                    density: MenuBarDensity(rawValue: menuBarDensity) ?? .full,
-                    sources: Array(menuBarQuotaSelectedSources.prefix(2))
-                )
-                Spacer()
-            }
         }
         .onChange(of: menuBarStyle) { _ in
             (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
@@ -3180,6 +3235,7 @@ struct PanelView: View {
                 settingsRow("z.ai / GLM", tint: Theme.zai, isOn: $showZai)
                 settingsRow("Grok", tint: Theme.grok, isOn: $showGrok)
                 settingsRow("Grok Bot", tint: Theme.grokBot, isOn: $showGrokBot)
+                settingsRow("Doubao Work", tint: Theme.doubaoWork, isOn: $showDoubaoWork)
                 settingsRow("Qoder Desktop", tint: Theme.qoder, isOn: $showQoder)
                 settingsRow("QoderWork", tint: Theme.qoderwork, isOn: $showQoderWork)
                 settingsRow("Qoder CLI", tint: Theme.qodercli, isOn: $showQoderCli)
@@ -3539,6 +3595,19 @@ struct PanelView: View {
                 .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            thinDivider
+            settingsToggleRow(L("豆包工作额度查询"), isOn: $doubaoWorkQuotaEnabled)
+            Text(L("额度连接为试验功能，登录兼容性仍在验证。"))
+                .font(.system(size: Theme.fontSize(8.5)))
+                .foregroundStyle(Theme.tTertiary)
+            Text(L("首次连接时登录豆包官网，登录状态在 Tokei 中保留。之后每 5 分钟静默刷新额度；登录失效时不会自动弹窗。关闭后停止查询，保留登录状态。"))
+                .font(.system(size: Theme.fontSize(8.5)))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            settingsActionButton(icon: "person.crop.circle", title: L("连接豆包账号查看额度")) {
+                DoubaoWorkQuotaBridge.shared.connect()
+            }
         }
         .onChange(of: claudeCLIQuotaEnabled) { _ in
             store.refresh()
@@ -3554,6 +3623,12 @@ struct PanelView: View {
         .onChange(of: qwenWorkQuotaEnabled) { enabled in
             Self.setQwenWorkQuotaEnabled(enabled)
             store.refresh()
+        }
+        .onChange(of: doubaoWorkQuotaEnabled) { enabled in
+            if SyncManager.setDoubaoWorkQuotaEnabled(enabled) {
+                DoubaoWorkQuotaBridge.shared.configure(enabled: enabled)
+                store.refresh()
+            }
         }
     }
 
@@ -4170,6 +4245,62 @@ struct PanelView: View {
         .padding(.vertical, 5)
     }
 
+    func menuBarStyleTile(_ style: MenuBarStyle) -> some View {
+        let selected = style.rawValue == menuBarStyle
+        return Button {
+            menuBarStyle = style.rawValue
+        } label: {
+            VStack(spacing: 4) {
+                MenuBarStylePreview(
+                    style: style,
+                    density: MenuBarDensity(rawValue: menuBarDensity) ?? .full,
+                    sources: Array(menuBarQuotaSelectedSources.prefix(2))
+                )
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.black.opacity(0.28))
+                )
+                Text(style.label)
+                    .font(.system(size: Theme.fontSize(9), weight: selected ? .semibold : .medium))
+                    .foregroundStyle(selected ? Theme.tPrimary : Theme.tSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .padding(5)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(selected ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(selected ? Color.accentColor : Color.clear, lineWidth: 1.2)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(style.label)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    func settingsFittingPicker<C: View>(_ title: String, selection: Binding<String>,
+                                        @ViewBuilder options: () -> C) -> some View {
+        let options = options()
+        return ViewThatFits(in: .horizontal) {
+            MeasuredAtWidth(width: settingsMenuPickerWidth) {
+                Picker(title, selection: selection) { options }
+                    .pickerStyle(.segmented)
+            }
+            Picker(title, selection: selection) { options }
+                .pickerStyle(.menu)
+                .fixedSize()
+        }
+        .labelsHidden()
+        .controlSize(.mini)
+        .frame(width: settingsMenuPickerWidth)
+    }
+
     func settingsStackedValue<C: View>(_ title: String, @ViewBuilder value: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
@@ -4333,7 +4464,7 @@ struct PanelView: View {
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let tools = ["claude", "codex", "gemini", "antigravity", "cursor", "zed",
-                         "sub2api", "zai", "grok", "grok_bot", "qoder", "qoderwork", "qodercli",
+                         "sub2api", "zai", "grok", "grok_bot", "doubaowork", "qoder", "qoderwork", "qodercli",
                          "qodercli_cn", "hermes",
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
                          "codebuddy",
