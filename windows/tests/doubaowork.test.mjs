@@ -83,11 +83,11 @@ test("English activity card and share have translated metrics and limitations", 
   runtime.pref("appLanguage", "en");
   await prepareLanguage("en");
   const html = renderToStaticMarkup(doubaoWorkCard.render(ctx(sample)));
-  assert.match(html, /new conversations/);
-  assert.match(html, /Token usage is not provided/);
+  assert.match(html, /new sessions/);
+  assert.match(html, /no token usage is provided/);
   assert.doesNotMatch(html, /[一-鿿]/);
   const line = share.shareToolLines(sample, "all", {}).find(line => line.id === "doubaowork");
-  assert.equal(line.activityLabel, "Total conversations");
+  assert.equal(line.activityLabel, "Total sessions");
 });
 
 const quotaSample = () => {

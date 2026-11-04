@@ -623,7 +623,7 @@
 "点击托盘图标" = "Click the tray icon";
 "这个周期约花了 %@" = "About %@ spent this period";
 "额度更新中…" = "Updating quota…";
-"%@ 月额度" = "%@-month quota";
+"%@ 月额度" = "%@ monthly quota";
 "Grok 还没有额度卡片：登录一次 grok.com 让 Tokei 抓到额度读数。" = "No Grok quota card yet: sign in to grok.com once so Tokei can pick up a quota reading.";
 "一个额度周期用了多少" = "How much of one quota period was used";
 "上次额度重置到现在，所有设备合计，按 API 价折算" = "Since the last quota reset, all devices combined, converted at API prices";
