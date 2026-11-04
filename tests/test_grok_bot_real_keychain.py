@@ -68,8 +68,18 @@ class GrokBotRealKeychainTests(unittest.TestCase):
         self.compile(resolver, [ROOT / "Tokei/Sources/Tokei/GrokBotHelperManager.swift",
                                SWIFT / "GrokBotRealKeychainResolver.swift"])
         helpers = {}
-        for version in ["v1.0.47", "v1.0.48", "current"]:
-            source = (ROOT / BRIDGE).read_text() if version == "current" else self.command(["git", "show", f"{version}:{BRIDGE}"])
+        for version in ["v1.0.47", "v1.0.48", "unsafe-legacy", "current"]:
+            source_version = "v1.0.48" if version == "unsafe-legacy" else version
+            source = (ROOT / BRIDGE).read_text() if version == "current" else self.command(["git", "show", f"{source_version}:{BRIDGE}"])
+            if version == "unsafe-legacy":
+                # The v1.0.48 tag retains suppression, unlike the shipped unsafe
+                # binary. Model that missing capability explicitly; recompiling
+                # the tag cannot reproduce the official binary digest. Never
+                # execute this fixture against a Keychain item.
+                start = source.index("        var previousInteraction = DarwinBoolean(false)")
+                end = source.index("        var query: [String: Any]", start)
+                source = source[:start] + source[end:]
+                self.assertNotIn("SecKeychainSetUserInteractionAllowed", source)
             self.report.setdefault("bridge_source_sha256", {})[version] = hashlib.sha256(source.encode()).hexdigest()
             if version != "current":
                 original = "let status = SecItemCopyMatching(query as CFDictionary, &item)"
@@ -81,6 +91,10 @@ class GrokBotRealKeychainTests(unittest.TestCase):
             helper = root / f"helper-{version}"
             flags = ["-D", "TOKEI_GROK_BOT_KEYCHAIN_TEST"] if version == "current" else []
             self.compile(helper, [source_file, SWIFT / "GrokBotRealKeychainHelper.swift"], flags)
+            if version != "current":
+                self.assertEqual(b"_SecKeychainSetUserInteractionAllowed\0" in helper.read_bytes(),
+                                 version != "unsafe-legacy",
+                                 "Compiled legacy fixture must reflect its suppression capability")
             helpers[version] = helper
 
         marker = root / "authorization-marker"
@@ -179,10 +193,11 @@ class GrokBotRealKeychainTests(unittest.TestCase):
                     read("current-helper-unlocked", helper=helpers["current"])
                 self.assertEqual(self.command([admin, "acl", current_keychain, service]), current_acl)
                 self.assertIsNone(resolve(root / "missing-helper")["helper"])
-                blocked = resolve(helpers["v1.0.48"])
+                self.assertEqual(resolve(helpers["v1.0.48"])["helper"], str(helpers["v1.0.48"]))
+                blocked = resolve(helpers["unsafe-legacy"])
                 self.assertTrue(blocked["blocked"])
                 self.assertIsNone(blocked["helper"])
-                self.report["checks"].append({"name": "unsafe-v1.0.48-paused-before-keychain-access"})
+                self.report["checks"].append({"name": "unsafe-legacy-paused-before-keychain-access"})
                 marker.rename(root / "saved-consent")
                 with mock.patch.object(usage.subprocess, "Popen") as no_launch:
                     self.assertEqual(usage._grok_bot_helper_start("missing-consent"), (False, False))
