@@ -108,7 +108,7 @@ jobs:
               if git cat-file -e "HEAD:$f" 2>/dev/null; then
                 git checkout -q HEAD -- "$f"    # 本地已有 → 恢复本地版本
               elif [ -e "$f" ]; then
-                git rm -q -- "$f"               # 上游新增（本地不存在）→ 不带入
+                git rm -qf -- "$f"              # 上游新增（本地不存在）→ 强制不带入
               fi
             done <<< "$CHANGED"
           fi
