@@ -22,6 +22,9 @@ on:
 permissions:
   contents: write
   issues: write
+  # 上游改动可能包含 workflow 文件（如新增 linux.yml）；GitHub 要求推送
+  # 这类变更的 token 具备 workflows 权限，否则合并成功也会被远端拒绝。
+  workflows: write
 
 concurrency:
   group: sync-upstream
