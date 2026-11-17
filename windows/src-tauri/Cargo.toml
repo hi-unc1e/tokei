@@ -1,6 +1,6 @@
 [package]
 name = "tokei"
-version = "1.0.51"
+version = "1.0.52"
 description = "Tokei — AI 编码工具用量监控（Windows 版）"
 authors = ["cclank"]
 edition = "2021"
@@ -27,6 +27,11 @@ serde_json = "1"
 dirs = "6"
 getrandom = "0.3"
 keyring = { version = "3", features = ["windows-native", "apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9"
+dbus-secret-service = { version = "4.1", features = ["crypto-rust"] }
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Power"] }
