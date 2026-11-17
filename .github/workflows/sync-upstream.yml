@@ -22,9 +22,6 @@ on:
 permissions:
   contents: write
   issues: write
-  # 上游改动可能包含 workflow 文件（如新增 linux.yml）；GitHub 要求推送
-  # 这类变更的 token 具备 workflows 权限，否则合并成功也会被远端拒绝。
-  workflows: write
 
 concurrency:
   group: sync-upstream
@@ -71,9 +68,8 @@ jobs:
         run: |
           set -eu
           echo "BASE_BEFORE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          if ! git merge upstream/main \
-              -m "sync: merge upstream cclank/tokei@${UPSTREAM_SHA} (conflicts resolved in favor of ours)" \
-              -X ours; then
+          MERGE_MSG="sync: merge upstream cclank/tokei@${UPSTREAM_SHA} (conflicts resolved in favor of ours)"
+          if ! git merge --no-commit --no-ff upstream/main -X ours 2>/dev/null; then
             # -X ours 裁决不了 modify/delete 冲突（上游改动了本地已删除的文件等）。
             # 按既定策略自动裁决：本地删除的文件保持删除，其余未合并路径一律取本地版本。
             # 黑名单/编译/测试闸门在后续步骤兜底，裁决错了也进不了远端。
@@ -98,10 +94,29 @@ jobs:
                 git add -q -- "$f" 2>/dev/null || true
               fi
             done <<< "$UNMERGED"
-            git commit -q --no-edit \
-              -m "sync: merge upstream cclank/tokei@${UPSTREAM_SHA} (conflicts resolved in favor of ours)"
-            echo "冲突已按本地策略裁决并提交。"
+            echo "冲突已按本地策略裁决。"
           fi
+          # 剔除上游对 .github/workflows 的变更：GITHUB_TOKEN 无 workflows 权限，
+          # 推送含 workflow 变更会被 GitHub 一律拒绝（连续五晚的失败根因）。
+          # 本 fork 的 CI 自治，不自动采纳上游 CI；如需采纳请在本地交互合并后手动推送。
+          CHANGED="$(git diff --name-only HEAD -- .github/workflows/ || true)"
+          if [ -n "$CHANGED" ]; then
+            echo "剔除上游 workflow 变更:"
+            echo "$CHANGED"
+            git checkout HEAD -- .github/workflows 2>/dev/null || true
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              if [ -e "$f" ] && ! git cat-file -e "HEAD:$f" 2>/dev/null; then
+                git rm -q -- "$f"   # 上游新增的 workflow 文件（本地不存在）
+              fi
+            done <<< "$CHANGED"
+          fi
+          if git diff --cached --quiet HEAD; then
+            echo "剔除后无其他变更，无需提交。"
+            exit 0
+          fi
+          git commit -q -m "$MERGE_MSG"
+          echo "合并已提交。"
 
       - name: Verify merge (telemetry blacklist)
         if: steps.changes.outputs.new_commits == 'true'
