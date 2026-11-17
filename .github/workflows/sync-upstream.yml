@@ -103,11 +103,12 @@ jobs:
           if [ -n "$CHANGED" ]; then
             echo "剔除上游 workflow 变更:"
             echo "$CHANGED"
-            git checkout HEAD -- .github/workflows 2>/dev/null || true
             while IFS= read -r f; do
               [ -n "$f" ] || continue
-              if [ -e "$f" ] && ! git cat-file -e "HEAD:$f" 2>/dev/null; then
-                git rm -q -- "$f"   # 上游新增的 workflow 文件（本地不存在）
+              if git cat-file -e "HEAD:$f" 2>/dev/null; then
+                git checkout -q HEAD -- "$f"    # 本地已有 → 恢复本地版本
+              elif [ -e "$f" ]; then
+                git rm -q -- "$f"               # 上游新增（本地不存在）→ 不带入
               fi
             done <<< "$CHANGED"
           fi
