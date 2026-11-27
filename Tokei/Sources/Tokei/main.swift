@@ -141,27 +141,31 @@ final class Store: ObservableObject {
                 self.finishRefresh(cycle)
                 return
             }
-            self.lastRefreshDuration = Date().timeIntervalSince(startedAt)
-            self.retryCount = 0
-            self.loadError = nil
-            self.localUsage = local
-            var allDevices = local
-            if self.syncEnabled {
-                let p: [PeerDevice]
-                if self.syncing && !self.peers.isEmpty {
-                    p = self.peers
-                } else {
-                    // 同步进行中若内存 peers 为空(如启动初期),仍从磁盘读快照,
-                    // 避免首次刷新只显示本机数据造成"暂无数据→过一会才有"的闪变
-                    let report = self.syncManager.loadPeers()
-                    p = report.peers
-                    self.peerLoadIssues = report.issues
+            self.prepareRefreshedUsage(local, startedAt: startedAt)
+        }
+    }
+
+    private func prepareRefreshedUsage(_ local: Usage, startedAt: Date) {
+        guard syncEnabled else {
+            publishRefreshedUsage(local, allDevices: local,
+                report: PeerLoadReport(peers: [], issues: []), startedAt: startedAt)
+            return
+        }
+        let config = syncManager.config
+        // 同步中仍优先使用上一份完整的 peer 快照；首次无缓存时也会读盘。
+        let cachedReport = syncing && !peers.isEmpty
+            ? PeerLoadReport(peers: peers, issues: peerLoadIssues) : nil
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let report = cachedReport ?? SyncManager.loadPeers(config: config)
+            let allDevices = report.peers.isEmpty ? local : SyncManager.merge(local: local, peers: report.peers)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                // 设置可能在后台读取期间变化，避免旧目录的快照覆盖当前范围。
+                guard self.syncEnabled, self.syncManager.config == config else {
+                    self.prepareRefreshedUsage(local, startedAt: startedAt)
+                    return
                 }
-                self.peers = p
-                if !p.isEmpty { allDevices = SyncManager.merge(local: local, peers: p) }
-            } else {
-                self.peers = []
-                self.peerLoadIssues = []
+                self.publishRefreshedUsage(local, allDevices: allDevices, report: report, startedAt: startedAt)
             }
             self.allDevicesUsage = allDevices
             self.recordQuotaHistory(local, claudeQuotaSource: allDevices)
@@ -176,6 +180,30 @@ final class Store: ObservableObject {
             self.prewarmQuotaDetailIfReady()
             self.finishRefresh(cycle)
         }
+    }
+
+    private func publishRefreshedUsage(
+        _ local: Usage, allDevices: Usage, report: PeerLoadReport, startedAt: Date
+    ) {
+        lastRefreshDuration = Date().timeIntervalSince(startedAt)
+        retryCount = 0
+        loadError = nil
+        localUsage = local
+        peers = report.peers
+        peerLoadIssues = report.issues
+        allDevicesUsage = allDevices
+        recordQuotaHistory(local, claudeQuotaSource: allDevices)
+        applyDisplayMode(updateStatusTitle: false)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        lastUpdated = L("更新 %@", formatter.string(from: Date()))
+        (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
+        if !refreshPending && !dashboardPrewarmStarted {
+            dashboardPrewarmStarted = true
+            DashboardRepository.shared.load(.all, force: true)
+        }
+        prewarmQuotaDetailIfReady()
+        finishRefresh()
     }
 
     private func prewarmQuotaDetailIfReady() {
@@ -270,7 +298,7 @@ final class Store: ObservableObject {
         syncManager.synchronize(snapshotCommand: snapshotCommand) { [weak self] result in
             guard let self else { return }
             self.syncing = false
-            self.syncDetail = result.output
+            self.syncDetail = L10n.syncOutput(result.output)
             if result.succeeded {
                 self.syncSucceeded = true
                 self.syncFailStreak = 0
@@ -449,6 +477,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             guard let self = self, self.popover.isShown else { return }
             if let popoverWindow = self.popover.contentViewController?.view.window,
                popoverWindow == event.window { return }
+            // Recent macOS hosts status items in a system process, so a click on our own
+            // icon also arrives here. Closing on that mouse-down makes the mouse-up in
+            // handleStatusItemClick see a closed panel and reopen it, so the icon could
+            // never hide the panel. Leave clicks on the icon to handleStatusItemClick.
+            let point = event.window?.convertPoint(toScreen: event.locationInWindow)
+                ?? event.locationInWindow
+            if let button = self.statusItem?.button,
+               PopoverAnchor.statusItem(button, contains: point) { return }
             self.popover.close()
         }
 
@@ -758,6 +794,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         store.popoverVisible = false
         stopFollowingAnchorWindow()
         popoverAnchor.close()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        store.quotaHistory.flushPendingWrites()
     }
 }
 

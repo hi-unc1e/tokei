@@ -58,7 +58,18 @@ struct PanelView: View {
         let active: Bool
         let tint: Color
         var presentation: ToolCardPresentation = .standard
-        let content: AnyView
+        let makeContent: () -> AnyView
+
+        init(id: String, name: String, visible: Bool, active: Bool, tint: Color,
+             presentation: ToolCardPresentation = .standard, content: @autoclosure @escaping () -> AnyView) {
+            self.id = id
+            self.name = name
+            self.visible = visible
+            self.active = active
+            self.tint = tint
+            self.presentation = presentation
+            makeContent = content
+        }
     }
     @AppStorage("showClaude") private var showClaude = true
     @AppStorage("showCodex") private var showCodex = true
@@ -112,6 +123,11 @@ struct PanelView: View {
     @AppStorage(MenuBarQuotaSource.kimi5h.defaultsKey) private var menuBarQuotaKimi5h = false
     @AppStorage(MenuBarQuotaSource.kimiSubscription.defaultsKey) private var menuBarQuotaKimiSubscription = false
     @AppStorage(MenuBarQuotaSource.grok.defaultsKey) private var menuBarQuotaGrok = false
+    @AppStorage(MenuBarQuotaSource.antigravityGeminiWeek.defaultsKey) private var menuBarQuotaAntigravityGeminiWeek = false
+    @AppStorage(MenuBarQuotaSource.antigravityGemini5h.defaultsKey) private var menuBarQuotaAntigravityGemini5h = false
+    @AppStorage(MenuBarQuotaSource.antigravityClaudeGPTWeek.defaultsKey) private var menuBarQuotaAntigravityClaudeGPTWeek = false
+    @AppStorage(MenuBarQuotaSource.antigravityClaudeGPT5h.defaultsKey) private var menuBarQuotaAntigravityClaudeGPT5h = false
+    @AppStorage(MenuBarQuotaSource.antigravityArgonWeek.defaultsKey) private var menuBarQuotaAntigravityArgonWeek = false
     @State private var copyFeedback = false
     @State private var copiedToolID: String?
 
@@ -610,18 +626,22 @@ struct PanelView: View {
         if useWide {
             EqualHeightGrid(columns: ordered.count == 1 ? 1 : 2) {
                 ForEach(ordered) { item in
-                    Card(tint: item.tint) { item.content }
-                        .id(cardContentIdentity(for: item))
+                    toolCard(item)
                 }
             }
         } else {
             VStack(spacing: 13) {
                 ForEach(ordered) { item in
-                    Card(tint: item.tint) { item.content }
-                        .id(cardContentIdentity(for: item))
+                    toolCard(item)
                 }
             }
         }
+    }
+
+    private func toolCard(_ item: ToolCardItem) -> some View {
+        // Scrolling under a stationary pointer must not animate each passing card.
+        Card(tint: item.tint, liftsOnHover: false, content: item.makeContent)
+            .id(cardContentIdentity(for: item))
     }
 
     private func cardContentIdentity(for item: ToolCardItem) -> String {
@@ -672,16 +692,16 @@ struct PanelView: View {
                 thinDivider
                 if let q5 = c.q5 {
                     quotaRow(title: L("5h 剩余"), pct: 100 - q5, reset: c.q5_reset,
-                             tint: Theme.claude, stale: c.q5_stale == true)
+                             tint: Theme.claude, stale: c.q5_stale == true, dimWhenStale: false)
                 }
                 if let q7 = c.q7 {
                     quotaRow(title: L("周 · 全部剩余"), pct: 100 - q7, reset: c.q7_reset,
-                             tint: Theme.claude, stale: c.q7_stale == true)
+                             tint: Theme.claude, stale: c.q7_stale == true, dimWhenStale: false)
                     cycleSpendRow("claude", reset: c.q7_reset)
                 }
                 if let qf = c.qf {
                     quotaRow(title: L("周 · Fable 剩余"), pct: 100 - qf, reset: c.qf_reset,
-                             tint: .orange, stale: c.qf_stale == true)
+                             tint: .orange, stale: c.qf_stale == true, dimWhenStale: false)
                 }
                 claudeQuotaStatus(c)
             } else if r.sessions > 0 {
@@ -2728,12 +2748,12 @@ struct PanelView: View {
 
     /// 一行额度。
     ///
-    /// `stale` 为真时仍然把数字画出来，只是压暗——额度过期就整行消失的话，卡片
-    /// 会在有和没有之间反复横跳，用户既看不出上次是多少，也说不清是坏了还是
-    /// 真没有。压暗加上下方的过期提示，足以说明「这是最后一次读到的值」。
+    /// 缓存读数保留到窗口重置。Claude 卡片用下方的更新时间提示新鲜度，
+    /// 同一窗口内沿用正常条色。
     func quotaRow(title: String, pct: Double, detail: String? = nil, reset: Int?,
-                  tint: Color, stale: Bool = false) -> some View {
+                  tint: Color, stale: Bool = false, dimWhenStale: Bool = true) -> some View {
         let low = pct <= 15 && !stale
+        let dimmed = stale && dimWhenStale
         let resetSinceReading = SubscriptionQuotaPresentation.hasResetSinceReading(
             stale: stale, reset: reset)
         return VStack(spacing: 4) {
@@ -2753,7 +2773,7 @@ struct PanelView: View {
                     Text(SubscriptionQuotaPresentation.remainingLabel(pct))
                         .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
                         .foregroundStyle(low ? AnyShapeStyle(.red)
-                                             : AnyShapeStyle(stale ? Theme.tTertiary : Theme.tPrimary))
+                                             : AnyShapeStyle(dimmed ? Theme.tTertiary : Theme.tPrimary))
                     // 无重置时间时不显示「· ?」，避免分产品行误导。
                     if reset != nil {
                         Text("· \(Fmt.reset(reset))")
@@ -2764,10 +2784,10 @@ struct PanelView: View {
             }
             // 已经翻篇的窗口不画旧进度条：空条像「剩 0%」，满条像「回满了」，都不对
             if !resetSinceReading {
-                MiniBar(value: pct, tint: low ? .red : tint.opacity(stale ? 0.4 : 1))
+                MiniBar(value: pct, tint: low ? .red : tint.opacity(dimmed ? 0.4 : 1))
             }
         }
-        .opacity(stale ? 0.65 : 1)
+        .opacity(dimmed ? 0.65 : 1)
         .help(resetSinceReading
               ? L("窗口已在 %@ 重置，还没读到新窗口的额度", Fmt.reset(reset))
               : stale ? L("上次读到的额度，尚未刷新")
@@ -3089,6 +3109,11 @@ struct PanelView: View {
         case .kimi5h: return $menuBarQuotaKimi5h
         case .kimiSubscription: return $menuBarQuotaKimiSubscription
         case .grok: return $menuBarQuotaGrok
+        case .antigravityGeminiWeek: return $menuBarQuotaAntigravityGeminiWeek
+        case .antigravityGemini5h: return $menuBarQuotaAntigravityGemini5h
+        case .antigravityClaudeGPTWeek: return $menuBarQuotaAntigravityClaudeGPTWeek
+        case .antigravityClaudeGPT5h: return $menuBarQuotaAntigravityClaudeGPT5h
+        case .antigravityArgonWeek: return $menuBarQuotaAntigravityArgonWeek
         }
     }
 
@@ -3102,7 +3127,7 @@ struct PanelView: View {
         }
     }
 
-    /// 6 个开关拼成一个值，菜单栏刷新只挂一个 onChange。
+    /// 额度开关合成一个值，菜单栏刷新只挂一个 onChange。
     private var menuBarQuotaDigest: String {
         MenuBarQuotaSource.allCases
             .map { menuBarQuotaBinding($0).wrappedValue ? "1" : "0" }
@@ -4550,15 +4575,13 @@ struct PanelView: View {
             let output = String(data: data, encoding: .utf8) ?? ""
             DispatchQueue.main.async {
                 priceUpdating = false
-                if flag == "--update-prices" {
-                    priceResult = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if flag == "--update-unknown",
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let count = json["count"] as? Int {
+                    priceResult = count > 0 ? L("补全 %@ 个模型", count) : L("所有模型已匹配 ✓")
                 } else {
-                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let count = json["count"] as? Int {
-                        priceResult = count > 0 ? L("补全 %@ 个模型", count) : L("所有模型已匹配 ✓")
-                    } else {
-                        priceResult = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                    }
+                    // The collector reports in Chinese, one sentence per line.
+                    priceResult = L10n.dataLines(output)
                 }
                 store.refresh()
             }
