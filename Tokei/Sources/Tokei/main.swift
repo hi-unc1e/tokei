@@ -167,18 +167,6 @@ final class Store: ObservableObject {
                 }
                 self.publishRefreshedUsage(local, allDevices: allDevices, report: report, startedAt: startedAt)
             }
-            self.allDevicesUsage = allDevices
-            self.recordQuotaHistory(local, claudeQuotaSource: allDevices)
-            self.applyDisplayMode(updateStatusTitle: false)
-            let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
-            self.lastUpdated = L("更新 %@", f.string(from: Date()))
-            (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
-            if !self.refreshPending && !self.dashboardPrewarmStarted {
-                self.dashboardPrewarmStarted = true
-                DashboardRepository.shared.load(.all, force: true)
-            }
-            self.prewarmQuotaDetailIfReady()
-            self.finishRefresh(cycle)
         }
     }
 
@@ -203,7 +191,7 @@ final class Store: ObservableObject {
             DashboardRepository.shared.load(.all, force: true)
         }
         prewarmQuotaDetailIfReady()
-        finishRefresh()
+        finishRefresh(refreshCycle)
     }
 
     private func prewarmQuotaDetailIfReady() {
